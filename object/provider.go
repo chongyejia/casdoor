@@ -278,6 +278,15 @@ func GetWechatMiniProgramProvider(application *Application) *Provider {
 	return nil
 }
 
+func GetLarkMiniProgramProvider(application *Application) *Provider {
+	for _, item := range application.Providers {
+		if item.Provider != nil && item.Provider.Type == "LarkMiniProgram" {
+			return item.Provider
+		}
+	}
+	return nil
+}
+
 func UpdateProvider(id string, provider *Provider) (bool, error) {
 	owner, name, err := util.GetOwnerAndNameFromIdWithError(id)
 	if err != nil {

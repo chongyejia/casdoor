@@ -70,6 +70,16 @@ func GetOAuthToken(grantType string, clientId string, clientSecret string, code 
 		}
 		return token, nil
 	}
+	if tag == "lark_miniprogram" {
+		token, tokenError, err := GetLarkMiniProgramToken(application, code, host, username, avatar, lang)
+		if err != nil {
+			return nil, err
+		}
+		if tokenError != nil {
+			return tokenError, nil
+		}
+		return token, nil
+	}
 
 	// Check if grantType is allowed in the current application
 	if !IsGrantTypeValid(grantType, application.GrantTypes) {

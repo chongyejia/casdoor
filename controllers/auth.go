@@ -585,6 +585,11 @@ func checkMfaEnable(c *ApiController, user *object.User, organization *object.Or
 }
 
 func getExistUserByBindingRule(providerItem *object.ProviderItem, application *object.Application, userInfo *idp.UserInfo) (user *object.User, err error) {
+	if providerItem.Provider != nil && providerItem.Provider.Type == "Lark" {
+		// An email, phone or display name is not proof that two Lark accounts
+		// are the same person. Only the configured typed external ID can bind.
+		return nil, nil
+	}
 	if providerItem.BindingRule == nil {
 		providerItem.BindingRule = &[]string{"Email", "Phone"}
 	}
@@ -639,6 +644,9 @@ func isEmailBindable(user *object.User) bool {
 }
 
 func getUserByProvider(organization string, provider *object.Provider, providerId string) (*object.User, error) {
+	if provider.Type == "Lark" && provider.UserIdType != "" {
+		return object.GetUserByLarkIdentity(organization, provider.UserIdType, providerId)
+	}
 	if object.IsFlexibleCustomProvider(provider.Type) {
 		return object.GetUserByThirdPartyLink(organization, provider.Name, providerId)
 	}

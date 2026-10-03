@@ -918,6 +918,21 @@ export default function ProviderEditPage() {
           <Switch disabled={!provider.clientId} checked={!!provider.disableSsl} onCheckedChange={(v) => updateProviderField("disableSsl", v)} />
         </FormRow>
       ) : null}
+      {["Lark", "LarkMiniProgram"].includes(provider.type) ? (
+        <FormRow label="Lark user ID type" tooltip="Choose the ID type stored in existing Lark account bindings. An unset type cannot authenticate.">
+          <SelectField
+            value={provider.userIdType ?? ""}
+            onChange={(v) => updateProviderField("userIdType", v)}
+            placeholder="Select an explicit ID type"
+            allowUnknownValue={false}
+            options={[
+              {id: "user_id", name: "user_id"},
+              {id: "union_id", name: "union_id"},
+              {id: "open_id", name: "open_id"},
+            ]}
+          />
+        </FormRow>
+      ) : null}
       {provider.type === "Alipay" ? (
         <React.Fragment>
           <FormRow labelKey="general:Cert">

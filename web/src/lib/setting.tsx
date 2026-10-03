@@ -926,7 +926,7 @@ export function isProviderVisible(providerItem) {
     return false;
   }
 
-  if (providerItem.provider.type === "WeChatMiniProgram") {
+  if (["WeChatMiniProgram", "LarkMiniProgram"].includes(providerItem.provider.type)) {
     return false;
   }
 
@@ -1422,6 +1422,7 @@ export function getProviderTypeOptions(category) {
         {id: "LinkedIn", name: "LinkedIn"},
         {id: "WeCom", name: "WeCom"},
         {id: "Lark", name: "Lark"},
+        {id: "LarkMiniProgram", name: "Lark Mini Program"},
         {id: "GitLab", name: "GitLab"},
         {id: "ADFS", name: "ADFS"},
         {id: "Baidu", name: "Baidu"},

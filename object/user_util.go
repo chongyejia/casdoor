@@ -55,6 +55,70 @@ func GetUserByField(organizationName string, field string, value string) (*User,
 	}
 }
 
+// GetUserByLarkIdentity resolves only an explicitly typed Lark ID in one
+// organization. Old rows may contain different Lark ID types in the same
+// column; an untyped or duplicate row needs manual review, not a first match.
+func GetUserByLarkIdentity(owner string, idType string, value string) (*User, error) {
+	if owner == "" || value == "" || larkPropertyKey(idType) == "" {
+		return nil, fmt.Errorf("Lark identity requires owner, supported ID type and value")
+	}
+	var users []*User
+	if err := ormer.Engine.Where("owner = ? AND lark = ?", owner, value).Limit(2).Find(&users); err != nil {
+		return nil, err
+	}
+	return chooseTypedLarkUser(users, owner, idType, value)
+}
+
+func chooseTypedLarkUser(users []*User, owner, idType, value string) (*User, error) {
+	if len(users) > 1 {
+		return nil, fmt.Errorf("ambiguous Lark identity in organization")
+	}
+	if len(users) == 0 {
+		return nil, nil
+	}
+	if users[0].Owner != owner {
+		return nil, fmt.Errorf("Lark account is outside the requested organization")
+	}
+	if !matchesTypedLarkIdentity(users[0], idType, value) {
+		return nil, fmt.Errorf("Lark account lacks matching typed identity evidence")
+	}
+	return users[0], nil
+}
+
+func larkPropertyKey(idType string) string {
+	switch idType {
+	case "user_id":
+		return "larkUserId"
+	case "union_id":
+		return "larkUnionId"
+	case "open_id":
+		return "larkOpenId"
+	default:
+		return ""
+	}
+}
+
+func matchesTypedLarkIdentity(user *User, idType string, value string) bool {
+	if user == nil || user.Properties == nil || user.Lark != value {
+		return false
+	}
+	key := larkPropertyKey(idType)
+	if key == "" {
+		return false
+	}
+	if savedType := user.Properties["larkIdType"]; savedType != "" && savedType != idType {
+		return false
+	}
+	if user.Properties[key] == value {
+		return true // Legacy mini-program rows stored these keys directly.
+	}
+	var extra map[string]string
+	if err := jsoniter.Unmarshal([]byte(user.Properties["oauth_Lark_extra"]), &extra); err != nil {
+		return false
+	}
+	return extra[key] == value && (extra["larkIdType"] == "" || extra["larkIdType"] == idType)
+}
+
 func HasUserByField(organizationName string, field string, value string) bool {
 	user, err := GetUserByField(organizationName, field, value)
 	if err != nil {

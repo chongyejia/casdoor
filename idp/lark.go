@@ -30,10 +30,12 @@ type LarkIdProvider struct {
 	Client     *http.Client
 	Config     *oauth2.Config
 	LarkDomain string
+	UserIdType string
 }
 
-func NewLarkIdProvider(clientId string, clientSecret string, redirectUrl string, useGlobalEndpoint bool) *LarkIdProvider {
+func NewLarkIdProvider(clientId string, clientSecret string, redirectUrl string, useGlobalEndpoint bool, userIdType string) *LarkIdProvider {
 	idp := &LarkIdProvider{}
+	idp.UserIdType = userIdType
 
 	if useGlobalEndpoint {
 		idp.LarkDomain = "https://open.larksuite.com"
@@ -54,6 +56,9 @@ func (idp *LarkIdProvider) SetHttpClient(client *http.Client) {
 func (idp *LarkIdProvider) getConfig(clientId string, clientSecret string, redirectUrl string) *oauth2.Config {
 	endpoint := oauth2.Endpoint{
 		TokenURL: idp.LarkDomain + "/open-apis/auth/v3/tenant_access_token/internal",
+	}
+	if idp.UserIdType != "" {
+		endpoint.TokenURL = idp.LarkDomain + "/open-apis/auth/v3/app_access_token/internal"
 	}
 
 	config := &oauth2.Config{
@@ -80,6 +85,7 @@ type LarkAccessToken struct {
 	Code              int    `json:"code"`
 	Msg               string `json:"msg"`
 	TenantAccessToken string `json:"tenant_access_token"`
+	AppAccessToken    string `json:"app_access_token"`
 	Expire            int    `json:"expire"`
 }
 
@@ -104,8 +110,17 @@ func (idp *LarkIdProvider) GetToken(code string) (*oauth2.Token, error) {
 		return nil, fmt.Errorf("GetToken() error, appToken.Code: %d, appToken.Msg: %s", appToken.Code, appToken.Msg)
 	}
 
+	accessToken := appToken.TenantAccessToken
+	if idp.UserIdType != "" {
+		// The fork's OIDC exchange used an app token. Keep the upstream path for
+		// providers without an explicit legacy selector.
+		accessToken = appToken.AppAccessToken
+	}
+	if accessToken == "" {
+		return nil, fmt.Errorf("Lark app/tenant access token is empty")
+	}
 	t := &oauth2.Token{
-		AccessToken: appToken.TenantAccessToken,
+		AccessToken: accessToken,
 		TokenType:   "Bearer",
 		Expiry:      time.Unix(time.Now().Unix()+int64(appToken.Expire), 0),
 	}
@@ -169,6 +184,9 @@ type LarkUserInfo struct {
 }
 
 func (idp *LarkIdProvider) GetUserInfo(token *oauth2.Token) (*UserInfo, error) {
+	if idp.UserIdType != "" {
+		return idp.getLegacyUserInfo(token)
+	}
 	body := &struct {
 		GrantType string `json:"grant_type"`
 		Code      string `json:"code"`
@@ -243,6 +261,100 @@ func (idp *LarkIdProvider) GetUserInfo(token *oauth2.Token) (*UserInfo, error) {
 		CountryCode:   countryCode,
 	}
 	return &userInfo, nil
+}
+
+// getLegacyUserInfo preserves the fork's OIDC exchange and explicit ID choice.
+// It deliberately rejects missing or unsupported IDs rather than falling back
+// to a different identifier, which could link an unrelated account.
+func (idp *LarkIdProvider) getLegacyUserInfo(token *oauth2.Token) (*UserInfo, error) {
+	if token == nil || token.AccessToken == "" {
+		return nil, fmt.Errorf("Lark app access token is missing")
+	}
+	code, ok := token.Extra("code").(string)
+	if !ok || code == "" {
+		return nil, fmt.Errorf("Lark authorization code is missing")
+	}
+	body, err := json.Marshal(map[string]string{"grant_type": "authorization_code", "code": code})
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequest("POST", idp.LarkDomain+"/open-apis/authen/v1/oidc/access_token", strings.NewReader(string(body)))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json;charset=UTF-8")
+	req.Header.Set("Authorization", "Bearer "+token.AccessToken)
+	resp, err := idp.Client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Lark OIDC exchange returned HTTP %d", resp.StatusCode)
+	}
+	var exchange struct {
+		Code int `json:"code"`
+		Data struct {
+			AccessToken string `json:"access_token"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&exchange); err != nil {
+		return nil, err
+	}
+	if exchange.Code != 0 || exchange.Data.AccessToken == "" {
+		return nil, fmt.Errorf("Lark OIDC exchange rejected the code")
+	}
+	req, err = http.NewRequest("GET", idp.LarkDomain+"/open-apis/authen/v1/user_info", nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+exchange.Data.AccessToken)
+	resp, err = idp.Client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Lark user info returned HTTP %d", resp.StatusCode)
+	}
+	var info LarkUserInfo
+	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
+		return nil, err
+	}
+	if info.Code != 0 {
+		return nil, fmt.Errorf("Lark user info rejected the token")
+	}
+	var selected string
+	switch idp.UserIdType {
+	case "user_id":
+		selected = info.Data.UserId
+	case "union_id":
+		selected = info.Data.UnionId
+	case "open_id":
+		selected = info.Data.OpenId
+	default:
+		return nil, fmt.Errorf("unsupported Lark userIdType: %q", idp.UserIdType)
+	}
+	if selected == "" {
+		return nil, fmt.Errorf("selected Lark %s is missing", idp.UserIdType)
+	}
+	email := info.Data.EnterpriseEmail
+	if email == "" {
+		email = info.Data.Email
+	}
+	return &UserInfo{
+		Id:          selected,
+		Username:    "lark-" + selected,
+		DisplayName: info.Data.Name,
+		Email:       email,
+		AvatarUrl:   info.Data.AvatarUrl,
+		Extra: map[string]string{
+			"larkUserId":  info.Data.UserId,
+			"larkUnionId": info.Data.UnionId,
+			"larkOpenId":  info.Data.OpenId,
+			"larkIdType":  idp.UserIdType,
+		},
+	}, nil
 }
 
 func (idp *LarkIdProvider) postWithBody(body interface{}, url string) ([]byte, error) {
