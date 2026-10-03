@@ -1,7 +1,6 @@
 package object
 
 import (
-	"fmt"
 	"net/http"
 	"time"
 
@@ -12,7 +11,7 @@ import (
 // GetLarkMiniProgramToken exchanges a Lark mini-program authorization code
 // through the application's configured provider. It never searches across
 // Lark ID types or organizations when choosing an existing Casdoor account.
-func GetLarkMiniProgramToken(application *Application, code, host, username, avatar, lang string) (*Token, *TokenError, error) {
+func GetLarkMiniProgramToken(application *Application, code, host, _username, _avatar, lang, clientIp string) (*Token, *TokenError, error) {
 	mpProvider := GetLarkMiniProgramProvider(application)
 	if mpProvider == nil || mpProvider.Owner == "" {
 		return nil, &TokenError{Error: InvalidClient, ErrorDescription: "the application does not support lark mini program"}, nil
@@ -44,50 +43,28 @@ func GetLarkMiniProgramToken(application *Application, code, host, username, ava
 	if err != nil {
 		return nil, &TokenError{Error: InvalidGrant, ErrorDescription: "lark user code exchange failed"}, nil
 	}
-	return getLarkMiniProgramTokenForIdentity(application, providerItem, provider.UserIdType, info, host, username, avatar, lang)
+	return getLarkMiniProgramTokenForIdentity(application, providerItem, provider.UserIdType, info, host, clientIp, lang)
 }
 
-func getLarkMiniProgramTokenForIdentity(application *Application, providerItem *ProviderItem, idType string, info *idp.UserInfo, host, username, avatar, lang string) (*Token, *TokenError, error) {
+func getLarkMiniProgramTokenForIdentity(application *Application, providerItem *ProviderItem, idType string, info *idp.UserInfo, host, clientIp, lang string) (*Token, *TokenError, error) {
 	if application == nil || application.Organization == "" || info == nil || info.Id == "" ||
-		providerItem == nil || !providerItem.CanSignIn || larkPropertyKey(idType) == "" || info.Extra[larkPropertyKey(idType)] != info.Id {
+		providerItem == nil || !providerItem.CanSignIn || larkPropertyKey(idType) == "" || info.Extra[larkPropertyKey(idType)] != info.Id ||
+		info.Extra["larkTenantKey"] == "" || info.Extra["larkAppId"] == "" {
 		return nil, &TokenError{Error: InvalidRequest, ErrorDescription: "the lark mini program identity is invalid"}, nil
 	}
-	user, err := GetUserByLarkIdentity(application.Organization, idType, info.Id)
+	user, err := GetUserByLarkIdentity(application.Organization, idType, info.Id, info.Extra["larkAppId"], info.Extra["larkTenantKey"])
 	if err != nil {
 		return nil, &TokenError{Error: InvalidGrant, ErrorDescription: "the lark identity needs manual review"}, nil
 	}
 	if user == nil {
-		if !providerItem.CanSignUp || !application.EnableSignUp || !application.IsSignupAllowedFor(application.Organization) {
-			return nil, &TokenError{Error: InvalidGrant, ErrorDescription: "the application does not allow to sign up new account"}, nil
-		}
-		name := username
-		if CheckUsername(name, lang) != "" {
-			name = "lark-" + info.Id
-		}
-		if old, err := GetUserByName(application.Organization, name); err != nil {
-			return nil, nil, err
-		} else if old != nil {
-			// A name collision never authorizes joining the existing account.
-			name = fmt.Sprintf("lark-%s-%s", info.Id, util.GenerateId())
-		}
-		newUserId, err := GenerateIdForNewUser(application)
-		if err != nil {
-			newUserId = util.GenerateId()
-		}
-		user = &User{
-			Owner: application.Organization, Id: newUserId, Name: name,
-			Avatar: avatar, SignupApplication: application.Name,
-			Lark: info.Id, Type: "normal-user", CreatedTime: util.GetCurrentTime(),
-			Properties: map[string]string{
-				"larkUserId": info.Extra["larkUserId"], "larkOpenId": info.Extra["larkOpenId"],
-				"larkUnionId": info.Extra["larkUnionId"], "larkIdType": idType,
-			},
-		}
-		if _, err := AddUser(user, lang); err != nil {
-			return nil, nil, err
-		}
+		// This direct token endpoint has no invitation or MFA enrollment
+		// challenge. New accounts must use a reviewed signup flow instead.
+		return nil, &TokenError{Error: InvalidGrant, ErrorDescription: "lark mini program signup requires a reviewed flow"}, nil
 	}
-	if tokenError := getInactiveUserTokenError(user); tokenError != nil {
+	if user.NeedUpdatePassword || user.IsMfaEnabled() || application.OrganizationObj == nil || IsNeedPromptMfa(application.OrganizationObj, user) {
+		return nil, &TokenError{Error: InvalidGrant, ErrorDescription: "the lark account requires an interactive sign-in challenge"}, nil
+	}
+	if tokenError := checkGrantUserSignin(application, user, clientIp, lang); tokenError != nil {
 		return nil, tokenError, nil
 	}
 	token, err := GetTokenByUser(application, user, "", "", "", host)

@@ -82,7 +82,7 @@ func (idp *LarkIdProvider) getConfig(clientId string, clientSecret string, redir
 */
 
 type LarkAccessToken struct {
-	Code              int    `json:"code"`
+	Code              *int   `json:"code"`
 	Msg               string `json:"msg"`
 	TenantAccessToken string `json:"tenant_access_token"`
 	AppAccessToken    string `json:"app_access_token"`
@@ -106,8 +106,8 @@ func (idp *LarkIdProvider) GetToken(code string) (*oauth2.Token, error) {
 		return nil, err
 	}
 
-	if appToken.Code != 0 {
-		return nil, fmt.Errorf("GetToken() error, appToken.Code: %d, appToken.Msg: %s", appToken.Code, appToken.Msg)
+	if appToken.Code == nil || *appToken.Code != 0 || appToken.Expire <= 0 {
+		return nil, fmt.Errorf("Lark app token response is invalid")
 	}
 
 	accessToken := appToken.TenantAccessToken
@@ -338,6 +338,9 @@ func (idp *LarkIdProvider) getLegacyUserInfo(token *oauth2.Token) (*UserInfo, er
 	if selected == "" {
 		return nil, fmt.Errorf("selected Lark %s is missing", idp.UserIdType)
 	}
+	if idp.Config.ClientID == "" || info.Data.TenantKey == "" {
+		return nil, fmt.Errorf("Lark app or tenant identity is missing")
+	}
 	email := info.Data.EnterpriseEmail
 	if email == "" {
 		email = info.Data.Email
@@ -349,10 +352,12 @@ func (idp *LarkIdProvider) getLegacyUserInfo(token *oauth2.Token) (*UserInfo, er
 		Email:       email,
 		AvatarUrl:   info.Data.AvatarUrl,
 		Extra: map[string]string{
-			"larkUserId":  info.Data.UserId,
-			"larkUnionId": info.Data.UnionId,
-			"larkOpenId":  info.Data.OpenId,
-			"larkIdType":  idp.UserIdType,
+			"larkUserId":    info.Data.UserId,
+			"larkUnionId":   info.Data.UnionId,
+			"larkOpenId":    info.Data.OpenId,
+			"larkIdType":    idp.UserIdType,
+			"larkAppId":     idp.Config.ClientID,
+			"larkTenantKey": info.Data.TenantKey,
 		},
 	}, nil
 }
@@ -368,17 +373,15 @@ func (idp *LarkIdProvider) postWithBody(body interface{}, url string) ([]byte, e
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("Lark token endpoint returned HTTP %d", resp.StatusCode)
+	}
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
 	}
 
-	defer func(Body io.ReadCloser) {
-		err := Body.Close()
-		if err != nil {
-			return
-		}
-	}(resp.Body)
 	return data, nil
 }

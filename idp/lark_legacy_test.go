@@ -33,7 +33,7 @@ func TestLegacyLarkExplicitIDSelection(t *testing.T) {
 					if req.Header.Get("Authorization") != "Bearer synthetic-user-token" {
 						t.Fatal("wrong user token")
 					}
-					body = `{"code":0,"data":{"name":"Synthetic","user_id":"user-synthetic","union_id":"union-synthetic","open_id":"open-synthetic","enterprise_email":"synthetic@example.invalid"}}`
+					body = `{"code":0,"data":{"name":"Synthetic","user_id":"user-synthetic","union_id":"union-synthetic","open_id":"open-synthetic","enterprise_email":"synthetic@example.invalid","tenant_key":"tenant-A"}}`
 				default:
 					t.Fatalf("unexpected endpoint: %s", req.URL.Path)
 				}
@@ -84,5 +84,29 @@ func TestLegacyLarkUsesAppTokenEndpoint(t *testing.T) {
 	token, err := provider.GetToken("synthetic-code")
 	if err != nil || token.AccessToken != "synthetic-app-token" || token.Extra("code") != "synthetic-code" {
 		t.Fatalf("legacy app token: token=%+v, error=%v", token, err)
+	}
+}
+
+func TestLegacyLarkRejectsInvalidAppTokenResponses(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+		body   string
+	}{
+		{"HTTP failure", http.StatusForbidden, `{"code":0,"app_access_token":"synthetic-app-token","expire":3600}`},
+		{"missing code", http.StatusOK, `{"app_access_token":"synthetic-app-token","expire":3600}`},
+		{"expired token", http.StatusOK, `{"code":0,"app_access_token":"synthetic-app-token","expire":0}`},
+		{"provider error", http.StatusOK, `{"code":999,"app_access_token":"synthetic-app-token","expire":3600}`},
+		{"malformed JSON", http.StatusOK, `{invalid`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := NewLarkIdProvider("synthetic-app", "synthetic-secret", "", false, "user_id")
+			provider.SetHttpClient(&http.Client{Transport: larkRoundTrip(func(req *http.Request) (*http.Response, error) {
+				return &http.Response{StatusCode: tc.status, Body: io.NopCloser(strings.NewReader(tc.body)), Header: http.Header{}}, nil
+			})})
+			if _, err := provider.GetToken("synthetic-code"); err == nil {
+				t.Fatal("invalid app token response accepted")
+			}
+		})
 	}
 }

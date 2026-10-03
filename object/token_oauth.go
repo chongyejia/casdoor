@@ -71,7 +71,10 @@ func GetOAuthToken(grantType string, clientId string, clientSecret string, code 
 		return token, nil
 	}
 	if tag == "lark_miniprogram" {
-		token, tokenError, err := GetLarkMiniProgramToken(application, code, host, username, avatar, lang)
+		if scope != "" || audience != "" || resource != "" {
+			return &TokenError{Error: InvalidScope, ErrorDescription: "lark mini program does not accept requested scopes or audiences"}, nil
+		}
+		token, tokenError, err := GetLarkMiniProgramToken(application, code, host, username, avatar, lang, clientIp)
 		if err != nil {
 			return nil, err
 		}

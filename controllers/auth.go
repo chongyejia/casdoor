@@ -643,9 +643,10 @@ func isEmailBindable(user *object.User) bool {
 	return user.EmailVerified || user.RegisterType != "Application Signup"
 }
 
-func getUserByProvider(organization string, provider *object.Provider, providerId string) (*object.User, error) {
+func getUserByProvider(organization string, provider *object.Provider, userInfo *idp.UserInfo) (*object.User, error) {
+	providerId := userInfo.Id
 	if provider.Type == "Lark" && provider.UserIdType != "" {
-		return object.GetUserByLarkIdentity(organization, provider.UserIdType, providerId)
+		return object.GetUserByLarkIdentity(organization, provider.UserIdType, providerId, provider.ClientId, userInfo.Extra["larkTenantKey"])
 	}
 	if object.IsFlexibleCustomProvider(provider.Type) {
 		return object.GetUserByThirdPartyLink(organization, provider.Name, providerId)
@@ -1100,7 +1101,7 @@ func (c *ApiController) Login() {
 					return
 				}
 			} else if provider.Category == "OAuth" || object.IsFlexibleCustomProvider(provider.Type) {
-				user, err = getUserByProvider(application.Organization, provider, userInfo.Id)
+				user, err = getUserByProvider(application.Organization, provider, userInfo)
 				if err != nil {
 					c.ResponseError(err.Error())
 					return
@@ -1323,7 +1324,7 @@ func (c *ApiController) Login() {
 			}
 
 			var oldUser *object.User
-			oldUser, err = getUserByProvider(application.Organization, provider, userInfo.Id)
+			oldUser, err = getUserByProvider(application.Organization, provider, userInfo)
 			if err != nil {
 				c.ResponseError(err.Error())
 				return
