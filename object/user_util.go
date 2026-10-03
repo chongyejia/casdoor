@@ -82,6 +82,9 @@ func chooseTypedLarkUser(users []*User, owner, idType, value string) (*User, err
 	if !matchesTypedLarkIdentity(users[0], idType, value) {
 		return nil, fmt.Errorf("Lark account lacks matching typed identity evidence")
 	}
+	if users[0].IsForbidden || users[0].IsDeleted {
+		return nil, fmt.Errorf("Lark account is inactive")
+	}
 	return users[0], nil
 }
 

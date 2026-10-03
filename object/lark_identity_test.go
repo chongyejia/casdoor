@@ -35,4 +35,13 @@ func TestTypedLarkUserSelectionRejectsAmbiguityAndCrossOwner(t *testing.T) {
 	if got, err := chooseTypedLarkUser([]*User{a}, "owner-a", "user_id", "same-id"); err != nil || got != a {
 		t.Fatalf("unique typed match rejected: account=%p, err=%v", got, err)
 	}
+	a.IsForbidden = true
+	if _, err := chooseTypedLarkUser([]*User{a}, "owner-a", "user_id", "same-id"); err == nil {
+		t.Fatal("forbidden account must not be used or recreated")
+	}
+	a.IsForbidden = false
+	a.IsDeleted = true
+	if _, err := chooseTypedLarkUser([]*User{a}, "owner-a", "user_id", "same-id"); err == nil {
+		t.Fatal("deleted account must not be used or recreated")
+	}
 }

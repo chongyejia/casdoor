@@ -44,8 +44,8 @@ jobs:
         run: |
           set -euo pipefail
           go version
-          go test ./idp -run '^$'
-          go test ./object -run '^TestLegacyLarkUserIdTypeSurvivesProviderConversion$'
+          go test ./idp -run '^TestLegacyLark' -count=1
+          go test ./object -run '^Test(LarkMiniProgram|TypedLark|LegacyLark)' -count=1
           go build -p 2 ./...
 
       - name: Build local container image

@@ -279,12 +279,16 @@ func GetWechatMiniProgramProvider(application *Application) *Provider {
 }
 
 func GetLarkMiniProgramProvider(application *Application) *Provider {
+	var match *Provider
 	for _, item := range application.Providers {
-		if item.Provider != nil && item.Provider.Type == "LarkMiniProgram" {
-			return item.Provider
+		if item != nil && item.Provider != nil && item.Provider.Type == "LarkMiniProgram" {
+			if match != nil {
+				return nil // The token tag does not identify which provider to use.
+			}
+			match = item.Provider
 		}
 	}
-	return nil
+	return match
 }
 
 func UpdateProvider(id string, provider *Provider) (bool, error) {

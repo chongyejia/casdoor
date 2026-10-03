@@ -20,6 +20,19 @@ func TestLarkMiniProgramRejectsMissingProviderCodeAndIDType(t *testing.T) {
 	}
 }
 
+func TestLarkMiniProgramRejectsAmbiguousProviders(t *testing.T) {
+	app := &Application{Organization: "synthetic-owner", Providers: []*ProviderItem{
+		{Provider: &Provider{Owner: "synthetic-owner", Name: "one", Type: "LarkMiniProgram", UserIdType: "user_id"}},
+		{Provider: &Provider{Owner: "synthetic-owner", Name: "two", Type: "LarkMiniProgram", UserIdType: "user_id"}},
+	}}
+	if GetLarkMiniProgramProvider(app) != nil {
+		t.Fatal("a tag without provider identity cannot select between two providers")
+	}
+	if _, tokenError, err := GetLarkMiniProgramToken(app, "synthetic-code", "", "", "", "en"); err != nil || tokenError == nil || tokenError.Error != InvalidClient {
+		t.Fatalf("ambiguous providers: error=%v tokenError=%+v", err, tokenError)
+	}
+}
+
 func TestLarkMiniProgramRejectsMismatchedSelectedIDBeforeLookup(t *testing.T) {
 	app := &Application{Organization: "synthetic-owner"}
 	info := &idp.UserInfo{Id: "synthetic-user", Extra: map[string]string{"larkOpenId": "synthetic-open"}}
