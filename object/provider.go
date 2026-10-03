@@ -45,6 +45,7 @@ type Provider struct {
 	ClientSecret      string            `xorm:"varchar(3000)" json:"clientSecret"`
 	ClientId2         string            `xorm:"varchar(100)" json:"clientId2"`
 	ClientSecret2     string            `xorm:"varchar(500)" json:"clientSecret2"`
+	UserIdType        string            `xorm:"varchar(100)" json:"userIdType"` // Legacy Lark ID selector; preserve during migration review.
 	Cert              string            `xorm:"varchar(100)" json:"cert"`
 	CustomAuthUrl     string            `xorm:"varchar(200)" json:"customAuthUrl"`
 	CustomTokenUrl    string            `xorm:"varchar(200)" json:"customTokenUrl"`
@@ -709,6 +710,7 @@ func FromProviderToIdpInfo(ctx *context.Context, provider *Provider) (*idp.Provi
 		ClientSecret:  provider.ClientSecret,
 		ClientId2:     provider.ClientId2,
 		ClientSecret2: provider.ClientSecret2,
+		UserIdType:    provider.UserIdType,
 		AppId:         provider.AppId,
 		HostUrl:       provider.Host,
 		TokenURL:      provider.CustomTokenUrl,

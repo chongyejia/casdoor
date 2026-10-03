@@ -48,6 +48,7 @@ type ProviderInfo struct {
 	AppId         string
 	HostUrl       string
 	RedirectUrl   string
+	UserIdType    string
 	DisableSsl    bool
 	CodeVerifier  string
 
