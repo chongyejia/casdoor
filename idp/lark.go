@@ -159,7 +159,7 @@ func (idp *LarkIdProvider) GetToken(code string) (*oauth2.Token, error) {
 */
 
 type LarkUserInfo struct {
-	Code int    `json:"code"`
+	Code *int   `json:"code"`
 	Msg  string `json:"msg"`
 	Data struct {
 		AccessToken      string `json:"access_token"`
@@ -293,7 +293,7 @@ func (idp *LarkIdProvider) getLegacyUserInfo(token *oauth2.Token) (*UserInfo, er
 		return nil, fmt.Errorf("Lark OIDC exchange returned HTTP %d", resp.StatusCode)
 	}
 	var exchange struct {
-		Code int `json:"code"`
+		Code *int `json:"code"`
 		Data struct {
 			AccessToken string `json:"access_token"`
 		} `json:"data"`
@@ -301,7 +301,7 @@ func (idp *LarkIdProvider) getLegacyUserInfo(token *oauth2.Token) (*UserInfo, er
 	if err := json.NewDecoder(resp.Body).Decode(&exchange); err != nil {
 		return nil, err
 	}
-	if exchange.Code != 0 || exchange.Data.AccessToken == "" {
+	if exchange.Code == nil || *exchange.Code != 0 || exchange.Data.AccessToken == "" {
 		return nil, fmt.Errorf("Lark OIDC exchange rejected the code")
 	}
 	req, err = http.NewRequest("GET", idp.LarkDomain+"/open-apis/authen/v1/user_info", nil)
@@ -321,7 +321,7 @@ func (idp *LarkIdProvider) getLegacyUserInfo(token *oauth2.Token) (*UserInfo, er
 	if err := json.NewDecoder(resp.Body).Decode(&info); err != nil {
 		return nil, err
 	}
-	if info.Code != 0 {
+	if info.Code == nil || *info.Code != 0 {
 		return nil, fmt.Errorf("Lark user info rejected the token")
 	}
 	var selected string

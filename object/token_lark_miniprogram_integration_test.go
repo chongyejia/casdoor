@@ -7,9 +7,11 @@ import (
 	"encoding/pem"
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
 	"testing"
 
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/xorm-io/xorm"
 )
 
@@ -86,6 +88,19 @@ func TestLarkMiniProgramFullTokenFlowRejectsDisabledApplication(t *testing.T) {
 
 func requireSyntheticLarkDenied(t *testing.T, clientIp string) {
 	t.Helper()
+	beforeUsers, err := ormer.Engine.Count(new(User))
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeTokens, err := ormer.Engine.Count(new(Token))
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeUser := &User{Owner: "synthetic-org", Name: "synthetic-user"}
+	beforeExists, err := ormer.Engine.Get(beforeUser)
+	if err != nil {
+		t.Fatal(err)
+	}
 	result, err := requestSyntheticLarkToken(clientIp)
 	if err != nil {
 		t.Fatal(err)
@@ -93,16 +108,55 @@ func requireSyntheticLarkDenied(t *testing.T, clientIp string) {
 	if _, ok := result.(*TokenError); !ok {
 		t.Fatalf("expected token rejection, got %T", result)
 	}
+	afterUsers, err := ormer.Engine.Count(new(User))
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterTokens, err := ormer.Engine.Count(new(Token))
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterUser := &User{Owner: "synthetic-org", Name: "synthetic-user"}
+	afterExists, err := ormer.Engine.Get(afterUser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if beforeUsers != afterUsers || beforeTokens != afterTokens || beforeExists != afterExists || (beforeExists && !reflect.DeepEqual(beforeUser, afterUser)) {
+		t.Fatal("rejected token flow mutated user or token records")
+	}
 }
 
 func TestLarkMiniProgramFullTokenFlowAllowsScopedActiveUser(t *testing.T) {
-	setupSyntheticLarkTokenFlow(t)
+	app, _, user, _ := setupSyntheticLarkTokenFlow(t)
 	result, err := requestSyntheticLarkToken("198.51.100.7")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := result.(*Token); !ok {
+	token, ok := result.(*Token)
+	if !ok {
 		t.Fatalf("expected synthetic token, got %T: %+v", result, result)
+	}
+	cert, err := GetCert("synthetic-org/synthetic-cert")
+	if err != nil || cert == nil {
+		t.Fatalf("synthetic certificate missing: %v", err)
+	}
+	privateKey, err := jwt.ParseRSAPrivateKeyFromPEM([]byte(cert.PrivateKey))
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, issuer := getOriginFromHost("lab.invalid")
+	for _, tc := range []struct{ name, value, tokenType string }{
+		{"access", token.AccessToken, "access-token"},
+		{"id", token.IdToken, "id-token"},
+	} {
+		claims := jwt.MapClaims{}
+		parsed, err := jwt.NewParser(jwt.WithValidMethods([]string{"RS256"}), jwt.WithIssuer(issuer), jwt.WithAudience(app.ClientId), jwt.WithExpirationRequired()).ParseWithClaims(tc.value, claims, func(*jwt.Token) (interface{}, error) { return &privateKey.PublicKey, nil })
+		if err != nil || !parsed.Valid {
+			t.Fatalf("%s token failed signature/iss/aud/exp check: %v", tc.name, err)
+		}
+		if claims["sub"] != user.Id || claims["tokenType"] != tc.tokenType {
+			t.Fatalf("%s token identity/type mismatch: %+v", tc.name, claims)
+		}
 	}
 }
 
@@ -129,6 +183,16 @@ func TestLarkMiniProgramFullTokenFlowRejectsSigninPolicies(t *testing.T) {
 		{"forbidden account", func(_ *Application, _ *Organization, user *User) error {
 			user.IsForbidden = true
 			_, err := ormer.Engine.ID([]interface{}{user.Owner, user.Name}).Cols("is_forbidden").Update(user)
+			return err
+		}},
+		{"soft deleted account", func(_ *Application, _ *Organization, user *User) error {
+			user.IsDeleted = true
+			_, err := ormer.Engine.ID([]interface{}{user.Owner, user.Name}).Cols("is_deleted").Update(user)
+			return err
+		}},
+		{"required MFA enrollment", func(_ *Application, org *Organization, _ *User) error {
+			org.MfaItems = []*MfaItem{{Name: TotpType, Rule: "Required"}}
+			_, err := ormer.Engine.ID([]interface{}{org.Owner, org.Name}).Cols("mfa_items").Update(org)
 			return err
 		}},
 		{"MFA challenge", func(_ *Application, _ *Organization, user *User) error {
@@ -168,8 +232,18 @@ func TestLarkMiniProgramFullTokenFlowRejectsCrossTenantAndUnreviewedSignup(t *te
 			_, err := ormer.Engine.ID([]interface{}{user.Owner, user.Name}).Cols("properties").Update(user)
 			return err
 		}},
-		{"new account", func(_ *Application, user *User, _ *string) error {
+		{"signup enabled but invitation required", func(app *Application, user *User, _ *string) error {
+			app.EnableSignUp = true
+			app.SignupItems = []*SignupItem{{Name: "invitationCode", Required: true}}
+			if _, err := ormer.Engine.ID([]interface{}{app.Owner, app.Name}).Cols("enable_sign_up", "signup_items").Update(app); err != nil {
+				return err
+			}
 			_, err := ormer.Engine.ID([]interface{}{user.Owner, user.Name}).Delete(user)
+			return err
+		}},
+		{"duplicate binding", func(_ *Application, user *User, _ *string) error {
+			duplicate := &User{Owner: user.Owner, Name: "synthetic-duplicate", Lark: user.Lark, Properties: user.Properties}
+			_, err := ormer.Engine.Insert(duplicate)
 			return err
 		}},
 	} {
@@ -188,13 +262,19 @@ func TestLarkMiniProgramFullTokenFlowRejectsCrossTenantAndUnreviewedSignup(t *te
 }
 
 func TestLarkMiniProgramFullTokenFlowRejectsRequestedScope(t *testing.T) {
-	setupSyntheticLarkTokenFlow(t)
-	result, err := GetOAuthToken("", "synthetic-client", "", "synthetic-code", "", "admin", "", "", "", "lab.invalid", "", "lark_miniprogram", "", "en", "", "", "", "", "", "", "", "", "198.51.100.7")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if tokenErr, ok := result.(*TokenError); !ok || tokenErr.Error != InvalidScope {
-		t.Fatalf("requested scope was not rejected: %T %+v", result, result)
+	for _, tc := range []struct{ name, scope, audience, resource string }{
+		{"scope", "admin", "", ""}, {"audience", "", "other-client", ""}, {"resource", "", "", "other-resource"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setupSyntheticLarkTokenFlow(t)
+			result, err := GetOAuthToken("", "synthetic-client", "", "synthetic-code", "", tc.scope, "", "", "", "lab.invalid", "", "lark_miniprogram", "", "en", "", "", "", "", "", tc.audience, tc.resource, "", "198.51.100.7")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tokenErr, ok := result.(*TokenError); !ok || tokenErr.Error != InvalidScope {
+				t.Fatalf("requested %s was not rejected: %T %+v", tc.name, result, result)
+			}
+		})
 	}
 }
 

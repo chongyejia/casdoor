@@ -110,3 +110,33 @@ func TestLegacyLarkRejectsInvalidAppTokenResponses(t *testing.T) {
 		})
 	}
 }
+
+func TestLegacyLarkRejectsInvalidOIDCResponses(t *testing.T) {
+	for _, tc := range []struct {
+		name, exchange, userInfo   string
+		exchangeStatus, userStatus int
+	}{
+		{"exchange HTTP failure", `{"code":0,"data":{"access_token":"synthetic-user-token"}}`, ``, 500, 200},
+		{"exchange missing code", `{"data":{"access_token":"synthetic-user-token"}}`, ``, 200, 200},
+		{"exchange missing token", `{"code":0,"data":{}}`, ``, 200, 200},
+		{"exchange malformed", `{invalid`, ``, 200, 200},
+		{"user info HTTP failure", `{"code":0,"data":{"access_token":"synthetic-user-token"}}`, `{"code":0}`, 200, 500},
+		{"user info missing code", `{"code":0,"data":{"access_token":"synthetic-user-token"}}`, `{"data":{"user_id":"synthetic-user","tenant_key":"tenant-A"}}`, 200, 200},
+		{"user info missing tenant", `{"code":0,"data":{"access_token":"synthetic-user-token"}}`, `{"code":0,"data":{"user_id":"synthetic-user"}}`, 200, 200},
+		{"user info malformed", `{"code":0,"data":{"access_token":"synthetic-user-token"}}`, `{invalid`, 200, 200},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			provider := NewLarkIdProvider("test-app", "test-secret", "", false, "user_id")
+			provider.SetHttpClient(&http.Client{Transport: larkRoundTrip(func(req *http.Request) (*http.Response, error) {
+				body, status := tc.exchange, tc.exchangeStatus
+				if strings.HasSuffix(req.URL.Path, "/user_info") {
+					body, status = tc.userInfo, tc.userStatus
+				}
+				return &http.Response{StatusCode: status, Body: io.NopCloser(strings.NewReader(body)), Header: http.Header{}}, nil
+			})})
+			if _, err := provider.GetUserInfo((&oauth2.Token{AccessToken: "synthetic-app-token"}).WithExtra(map[string]interface{}{"code": "synthetic-code"})); err == nil {
+				t.Fatal("invalid OIDC response accepted")
+			}
+		})
+	}
+}
