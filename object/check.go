@@ -291,10 +291,8 @@ func CheckPassword(user *User, password string, lang string, options ...bool) er
 		return fmt.Errorf(i18n.Translate(lang, "check:unsupported password type: %s"), passwordType)
 	}
 
-	if organization.MasterPassword != "" {
-		if password == organization.MasterPassword || credManager.IsPasswordCorrect(password, organization.MasterPassword, organization.PasswordSalt) {
-			return resetUserSigninErrorTimes(user)
-		}
+	if isOrganizationMasterPasswordCorrect(password, organization, credManager) {
+		return resetUserSigninErrorTimes(user)
 	}
 
 	if !credManager.IsPasswordCorrect(password, user.Password, organization.PasswordSalt) && !credManager.IsPasswordCorrect(password, user.Password, user.PasswordSalt) {
@@ -312,6 +310,14 @@ func CheckPassword(user *User, password string, lang string, options ...bool) er
 	}
 
 	return resetUserSigninErrorTimes(user)
+}
+
+func isOrganizationMasterPasswordCorrect(password string, organization *Organization, credManager cred.CredManager) bool {
+	if password == "" || organization == nil || organization.MasterPassword == "" || credManager == nil {
+		return false
+	}
+
+	return password == organization.MasterPassword || credManager.IsPasswordCorrect(password, organization.MasterPassword, organization.PasswordSalt)
 }
 
 func CheckPasswordComplexityByOrg(organization *Organization, password string, lang string) string {

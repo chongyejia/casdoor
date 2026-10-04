@@ -16,9 +16,11 @@ package object
 
 import (
 	"fmt"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/casdoor/casdoor/cred"
 	"github.com/casdoor/casdoor/idp"
 	"github.com/casdoor/casdoor/util"
 )
@@ -309,8 +311,10 @@ func GetPasswordToken(application *Application, username string, password string
 	if user.Ldap != "" {
 		err = CheckLdapUserPassword(user, password, lang)
 	} else {
-		// For OAuth users who don't have a password set, they cannot use password grant type
-		if user.Password == "" {
+		// An explicitly opted-in legacy application may exchange its organization's
+		// master password for a passwordless user. All other applications retain
+		// the default passwordless-user rejection.
+		if user.Password == "" && !isPasswordlessMasterGrantApplication(application) {
 			return nil, &TokenError{
 				Error:            InvalidGrant,
 				ErrorDescription: "OAuth users cannot use password grant type, please use authorization code flow",
@@ -323,6 +327,22 @@ func GetPasswordToken(application *Application, username string, password string
 			Error:            InvalidGrant,
 			ErrorDescription: fmt.Sprintf("invalid username or password: %s", err.Error()),
 		}, nil
+	}
+	if user.Ldap == "" && user.Password == "" {
+		organization, orgErr := GetOrganizationByUser(user)
+		if orgErr != nil {
+			return nil, nil, orgErr
+		}
+		passwordType := user.PasswordType
+		if passwordType == "" && organization != nil {
+			passwordType = organization.PasswordType
+		}
+		if !isOrganizationMasterPasswordCorrect(password, organization, cred.GetCredManager(passwordType)) {
+			return nil, &TokenError{
+				Error:            InvalidGrant,
+				ErrorDescription: "passwordless user requires the organization's master password",
+			}, nil
+		}
 	}
 
 	if tokenError := getMfaUserTokenError(user); tokenError != nil {
@@ -375,6 +395,11 @@ func GetPasswordToken(application *Application, username string, password string
 	}
 
 	return token, nil, nil
+}
+
+func isPasswordlessMasterGrantApplication(application *Application) bool {
+	allowedApplication := os.Getenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_APPLICATION")
+	return allowedApplication != "" && application != nil && application.GetId() == allowedApplication
 }
 
 // GetClientCredentialsToken handles the Client Credentials Grant flow.
