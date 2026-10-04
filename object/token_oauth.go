@@ -15,6 +15,7 @@
 package object
 
 import (
+	"crypto/subtle"
 	"fmt"
 	"os"
 	"strings"
@@ -100,7 +101,7 @@ func GetOAuthToken(grantType string, clientId string, clientSecret string, code 
 	case "authorization_code": // Authorization Code Grant
 		token, tokenError, err = GetAuthorizationCodeToken(application, clientSecret, code, verifier, resource, lang)
 	case "password": // Resource Owner Password Credentials Grant
-		token, tokenError, err = GetPasswordToken(application, username, password, scope, host, clientIp, lang)
+		token, tokenError, err = GetPasswordToken(application, clientSecret, username, password, scope, host, clientIp, lang)
 	case "client_credentials": // Client Credentials Grant
 		token, tokenError, err = GetClientCredentialsToken(application, clientSecret, scope, host)
 	case "token", "id_token": // Implicit Grant
@@ -287,7 +288,7 @@ func GetAuthorizationCodeToken(application *Application, clientSecret string, co
 }
 
 // GetPasswordToken handles the Resource Owner Password Credentials Grant flow.
-func GetPasswordToken(application *Application, username string, password string, scope string, host string, clientIp string, lang string) (*Token, *TokenError, error) {
+func GetPasswordToken(application *Application, clientSecret string, username string, password string, scope string, host string, clientIp string, lang string) (*Token, *TokenError, error) {
 	expandedScope, ok := IsScopeValidAndExpand(scope, application)
 	if !ok {
 		return nil, &TokenError{
@@ -314,10 +315,16 @@ func GetPasswordToken(application *Application, username string, password string
 		// An explicitly opted-in legacy application may exchange its organization's
 		// master password for a passwordless user. All other applications retain
 		// the default passwordless-user rejection.
-		if user.Password == "" && !isPasswordlessMasterGrantApplication(application) {
+		if user.Password == "" && !isPasswordlessMasterGrantApplication(application, user) {
 			return nil, &TokenError{
 				Error:            InvalidGrant,
 				ErrorDescription: "OAuth users cannot use password grant type, please use authorization code flow",
+			}, nil
+		}
+		if user.Password == "" && !isPasswordlessMasterGrantClientAuthenticated(application, clientSecret) {
+			return nil, &TokenError{
+				Error:            InvalidClient,
+				ErrorDescription: "client authentication is required for passwordless master grant",
 			}, nil
 		}
 		err = CheckPassword(user, password, lang)
@@ -397,9 +404,19 @@ func GetPasswordToken(application *Application, username string, password string
 	return token, nil, nil
 }
 
-func isPasswordlessMasterGrantApplication(application *Application) bool {
+func isPasswordlessMasterGrantApplication(application *Application, user *User) bool {
 	allowedApplication := os.Getenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_APPLICATION")
-	return allowedApplication != "" && application != nil && application.GetId() == allowedApplication
+	allowedOrganization := os.Getenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_ORGANIZATION")
+	return allowedApplication != "" && allowedOrganization != "" && application != nil && user != nil &&
+		application.GetId() == allowedApplication && application.Organization == allowedOrganization &&
+		user.Owner == allowedOrganization && !application.IsShared
+}
+
+func isPasswordlessMasterGrantClientAuthenticated(application *Application, clientSecret string) bool {
+	if application == nil || application.ClientSecret == "" || clientSecret == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(application.ClientSecret), []byte(clientSecret)) == 1
 }
 
 // GetClientCredentialsToken handles the Client Credentials Grant flow.

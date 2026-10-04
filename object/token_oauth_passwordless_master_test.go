@@ -7,21 +7,52 @@ import (
 )
 
 func TestPasswordlessMasterGrantApplicationIsExactAndOptIn(t *testing.T) {
-	app := &Application{Owner: "admin", Name: "synthetic-app"}
+	app := &Application{Owner: "admin", Name: "synthetic-app", Organization: "synthetic-org"}
+	user := &User{Owner: "synthetic-org"}
 	t.Setenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_APPLICATION", "")
-	if isPasswordlessMasterGrantApplication(app) {
+	t.Setenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_ORGANIZATION", "")
+	if isPasswordlessMasterGrantApplication(app, user) {
 		t.Fatal("passwordless master grant must be disabled by default")
 	}
 
 	t.Setenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_APPLICATION", "admin/synthetic-app")
-	if !isPasswordlessMasterGrantApplication(app) {
+	if isPasswordlessMasterGrantApplication(app, user) {
+		t.Fatal("organization opt-in is required separately")
+	}
+	t.Setenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_ORGANIZATION", "synthetic-org")
+	if !isPasswordlessMasterGrantApplication(app, user) {
 		t.Fatal("exact application should be opted in")
 	}
-	if isPasswordlessMasterGrantApplication(&Application{Owner: "other", Name: "synthetic-app"}) {
+	if isPasswordlessMasterGrantApplication(&Application{Owner: "other", Name: "synthetic-app", Organization: "synthetic-org"}, user) {
 		t.Fatal("same app name under another owner must be rejected")
 	}
-	if isPasswordlessMasterGrantApplication(&Application{Owner: "admin", Name: "other-app"}) {
+	if isPasswordlessMasterGrantApplication(&Application{Owner: "admin", Name: "other-app", Organization: "synthetic-org"}, user) {
 		t.Fatal("another application must be rejected")
+	}
+	if isPasswordlessMasterGrantApplication(&Application{Owner: "admin", Name: "synthetic-app", Organization: "other-org"}, user) {
+		t.Fatal("application in another organization must be rejected")
+	}
+	if isPasswordlessMasterGrantApplication(app, &User{Owner: "other-org"}) {
+		t.Fatal("user in another organization must be rejected")
+	}
+	app.IsShared = true
+	if isPasswordlessMasterGrantApplication(app, user) {
+		t.Fatal("shared application must be rejected")
+	}
+}
+
+func TestPasswordlessMasterGrantRequiresAuthenticatedClient(t *testing.T) {
+	app := &Application{ClientSecret: "synthetic-client-secret"}
+	if !isPasswordlessMasterGrantClientAuthenticated(app, "synthetic-client-secret") {
+		t.Fatal("matching synthetic client secret must authenticate")
+	}
+	for _, submitted := range []string{"", "synthetic-wrong-client-secret"} {
+		if isPasswordlessMasterGrantClientAuthenticated(app, submitted) {
+			t.Fatal("missing or incorrect client secret must be rejected")
+		}
+	}
+	if isPasswordlessMasterGrantClientAuthenticated(&Application{}, "synthetic-client-secret") {
+		t.Fatal("application without a registered client secret must be rejected")
 	}
 }
 
