@@ -46,6 +46,7 @@ jobs:
           go version
           go test ./idp -run '^TestLegacyLark' -count=1
           go test ./object -run '^Test(LarkMiniProgram|TypedLark|LegacyLark)' -count=1
+          go test ./object -run '^TestPasswordlessMasterGrant' -count=1
           go build -p 2 ./...
 
       - name: Build local container image
