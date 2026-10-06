@@ -1,3 +1,5 @@
+> 固定项目：**账号与权限 Casdoor**。日常接续先读 [中文交接首页](HANDOFF.md)，再按任务读取下方工程说明。目录迁移不代表上线。
+
 <div align="center">
   <a href="https://casdoor.ai">
     <img src="https://cdn.casbin.org/img/casdoor-logo_1185x256.png" alt="Casdoor" width="500">
