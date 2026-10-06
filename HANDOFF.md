@@ -12,7 +12,7 @@
 
 候选源码：本目录；部署/备份/兼容实验：docs/local-handoff/；独立 QA：其 qa/；旧 fork 溯源与身份合同：环境目录 outputs/统一执行看板研究-20261003/，不是另一正式运行源码。
 
-codex/casdoor-fork-v4.13.0-integration @ 351d8057：源码迁前干净。旧 CI 工作树已退役，原 HEAD 保存在 Git 标签 `retired/casdoor-ci-20261006`；同库逐文件恢复核验见环境 cleanup-20261006/。新增 docs/local-handoff 与首页为本次本地资料，不自动提交。
+当前日常分支 codex/casdoor-fork-v4.13.0-integration；源码迁前基线 351d8057，后续本地交接提交见 git log -1，tracked 差异已提交。旧 CI 工作树已退役，原 HEAD 保存在 Git 标签 `retired/casdoor-ci-20261006`；同库逐文件恢复核验见环境 cleanup-20261006/。docs/local-handoff 为本地留存证据；首页已本地提交。
 
 ## 已保留与缺口
 
@@ -30,7 +30,7 @@ codex/casdoor-fork-v4.13.0-integration @ 351d8057：源码迁前干净。旧 CI 
 
 2026-10-03/task-2；2026-10-04/task。
 
-历史原记录保持原文；旧绝对路径按 [迁移映射](/Users/luban/codebase/agents/workspace-management/migration/path-mapping.json) 查新位置。逐文件清单、Git 前后状态和路径修改前副本在 `workspace-management/migration/`。保留的 SDK/缓存见各项目迁移回执；清理不属于本轮。
+历史原记录保持原文；旧绝对路径按 [迁移映射](/Users/luban/codebase/agents/workspace-management/migration/path-mapping.json) 查新位置。逐文件清单、Git 前后状态和路径修改前副本在 `workspace-management/migration/`。保留的 SDK/缓存见各项目迁移回执；迁移回执保持原时间点；本轮后续退役以 cleanup-20261006 为准。
 
 测试/生产描述来自 2026-10-05/06 已有回执，本次未刷新线上状态。
 
