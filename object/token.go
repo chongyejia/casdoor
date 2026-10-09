@@ -178,6 +178,8 @@ func GetTokenByTokenValue(tokenValue, tokenTypeHint string) (*Token, error) {
 		if token != nil {
 			return token, nil
 		}
+	case "id_token", "id-token", "urn:ietf:params:oauth:token-type:id_token":
+		return GetTokenByIdToken(tokenValue)
 	}
 
 	return nil, nil

@@ -1,1 +1,6 @@
 web/node_modules/
+.codex/
+.agents/
+AGENTS.md
+HANDOFF.md
+docs/

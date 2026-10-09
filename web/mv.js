@@ -3,6 +3,7 @@
 import fs from "fs";
 import path from "path";
 import {fileURLToPath} from "url";
+import {validateBuildDirectory} from "./verify-build.mjs";
 
 const dirname = path.dirname(fileURLToPath(import.meta.url));
 const sourceDir = path.join(dirname, "build-temp");
@@ -18,6 +19,10 @@ if (!fs.existsSync(sourceDir)) {
   console.error(`Source directory "${sourceDir}" does not exist.`);
   process.exit(1);
 }
+
+// A mismatched index can serve HTTP 200 while the login page stays blank.
+// Check before touching the previous build so an invalid candidate is rejected.
+validateBuildDirectory(sourceDir);
 
 // Left behind by an earlier run that was interrupted between the two renames.
 if (fs.existsSync(backupDir)) {

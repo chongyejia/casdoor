@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM node:20.20.1 AS FRONT
+FROM --platform=$BUILDPLATFORM node:20.20.1@sha256:e391c5561646193be929e3fe55d27234f40a01d867d72b30ae1341b673a3bf4b AS FRONT
 WORKDIR /web
 
 # Copy only dependency files first for better caching
@@ -7,9 +7,10 @@ RUN yarn install --frozen-lockfile --network-timeout 1000000
 
 # Copy source files and build
 COPY ./web .
-RUN NODE_OPTIONS="--max-old-space-size=4096" yarn run build
+RUN node --test verify-build.test.mjs \
+    && NODE_OPTIONS="--max-old-space-size=4096" yarn run build
 
-FROM --platform=$BUILDPLATFORM golang:1.25.8 AS BACK
+FROM --platform=$BUILDPLATFORM golang:1.25.8@sha256:3ac2864710f25e84381bf5d4272261c7ba73ada0339d62034df4de20dabb33ca AS BACK
 WORKDIR /go/src/casdoor
 
 # Copy only go.mod and go.sum first for dependency caching
@@ -22,7 +23,7 @@ COPY . .
 RUN go test -v -run TestGetVersionInfo ./util/system_test.go ./util/system.go ./util/variable.go
 RUN ./build.sh
 
-FROM alpine:latest AS STANDARD
+FROM alpine@sha256:294b683cb724975bec92580e1e685676bd4b50bda910ddb8c51d4cabeaec77e6 AS STANDARD
 LABEL MAINTAINER="https://casdoor.org/"
 ARG USER=casdoor
 ARG TARGETOS
@@ -51,7 +52,7 @@ COPY --from=FRONT --chown=$USER:$USER /web/build ./web/build
 ENTRYPOINT ["/server"]
 
 
-FROM debian:latest AS ALLINONE
+FROM debian@sha256:913f6706df59a68922d1dd08f78c2476560a8d367897200a6005b00e5f67c2d5 AS ALLINONE
 LABEL MAINTAINER="https://casdoor.org/"
 ARG TARGETOS
 ARG TARGETARCH

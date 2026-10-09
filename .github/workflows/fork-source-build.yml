@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - codex/casdoor-fork-v4.13.0-integration
+  pull_request:
+    branches:
+      - master
   workflow_dispatch:
 
 permissions:
@@ -15,7 +18,7 @@ concurrency:
 
 jobs:
   source-build:
-    if: github.repository == 'chongyejia/casdoor' && github.ref == 'refs/heads/codex/casdoor-fork-v4.13.0-integration'
+    if: github.repository == 'chongyejia/casdoor' && (github.ref == 'refs/heads/codex/casdoor-fork-v4.13.0-integration' || github.event_name == 'pull_request')
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -46,6 +49,8 @@ jobs:
           go version
           go test ./idp -run '^TestLegacyLark' -count=1
           go test ./object -run '^Test(LarkMiniProgram|TypedLark|LegacyLark)' -count=1
+          go test ./object -run '^TestPasswordlessMaster(Grant|PasswordGrant)' -count=1
+          go test ./object -run '^TestTokenLookupIDSessionHints$' -count=1
           go build -p 2 ./...
 
       - name: Build local container image
