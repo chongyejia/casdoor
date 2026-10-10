@@ -18,28 +18,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 
 	"github.com/beego/beego/v2/server/web/context"
 	"github.com/casdoor/casdoor/conf"
 	"github.com/casdoor/casdoor/util"
+	"github.com/casdoor/casdoor/util/auditsecret"
 )
 
-var (
-	logPostOnly          bool
-	secretJsonRegex      *regexp.Regexp
-	secretFormRegex      *regexp.Regexp
-	secretMultipartRegex *regexp.Regexp
-)
-
-var secretRecordKeys = []string{
-	"password", "oldPassword", "newPassword", "masterPassword", "defaultPassword",
-	"clientSecret", "client_secret", "accessSecret", "refreshToken", "refresh_token",
-	"code_verifier", "passcode", "recoveryCode",
-}
-
-var secretRecordQueries = append([]string{"accessToken", "access_token", "id_token_hint"}, secretRecordKeys...)
+var logPostOnly bool
 
 // alwaysLoggedActions lists the actions that are always recorded, even for GET
 // requests when "logPostOnly" is enabled. These endpoints accept GET by design
@@ -53,10 +40,6 @@ var alwaysLoggedActions = map[string]bool{
 
 func init() {
 	logPostOnly = conf.GetConfigBool("logPostOnly")
-	keys := strings.Join(secretRecordKeys, "|")
-	secretJsonRegex = regexp.MustCompile(`"(` + keys + `)"\s*:\s*"(?:[^"\\]|\\.)*"`)
-	secretFormRegex = regexp.MustCompile(`(^|&)(` + keys + `)=[^&]*`)
-	secretMultipartRegex = regexp.MustCompile(`(name="(?:` + keys + `)"\r?\n\r?\n)[^\r\n]*`)
 }
 
 type Record struct {
@@ -91,9 +74,7 @@ type Response struct {
 }
 
 func maskSecrets(recordString string) string {
-	recordString = secretJsonRegex.ReplaceAllString(recordString, `"$1":"***"`)
-	recordString = secretFormRegex.ReplaceAllString(recordString, "${1}${2}=***")
-	return secretMultipartRegex.ReplaceAllString(recordString, "${1}***")
+	return auditsecret.Body(recordString, "application/json")
 }
 
 func NewRecord(ctx *context.Context) (*Record, error) {
@@ -103,16 +84,15 @@ func NewRecord(ctx *context.Context) (*Record, error) {
 		action = "notify-payment"
 	}
 
-	// "id_token_hint" carries a JWT, so it is dropped instead of being persisted in the audit row.
-	requestUri := util.FilterQuery(ctx.Request.RequestURI, secretRecordQueries)
+	// Parse encoded parameter names before persisting or forwarding audit data.
+	requestUri := auditsecret.URI(ctx.Request.RequestURI)
 	if len(requestUri) > 1000 {
 		requestUri = requestUri[0:1000]
 	}
 
 	object := ""
 	if ctx.Input.RequestBody != nil && len(ctx.Input.RequestBody) != 0 {
-		object = string(ctx.Input.RequestBody)
-		object = maskSecrets(object)
+		object = auditsecret.Body(string(ctx.Input.RequestBody), ctx.Request.Header.Get("Content-Type"))
 	}
 
 	respBytes, err := json.Marshal(ctx.Input.Data()["json"])
@@ -200,6 +180,8 @@ func AddRecord(record *Record) bool {
 		record.Organization = "built-in"
 	}
 	record.Owner = record.Organization
+	// Also sanitize records created outside NewRecord, before any webhook or storage.
+	record.RequestUri = auditsecret.URI(record.RequestUri)
 	record.Object = maskSecrets(record.Object)
 
 	errWebhook := SendWebhooks(record)
