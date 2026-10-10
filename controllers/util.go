@@ -173,11 +173,11 @@ func (c *ApiController) RequireAdmin() (string, bool) {
 		return "", false
 	}
 
-	if user.Owner == "built-in" {
+	if user.IsGlobalAdmin() {
 		return "", true
 	}
 
-	if !user.IsAdmin {
+	if !user.IsOrganizationAdmin() {
 		c.ResponseError(c.T("general:this operation requires administrator to perform"))
 		return "", false
 	}
@@ -210,7 +210,7 @@ func (c *ApiController) IsOrgAdmin() (bool, bool) {
 		return false, false
 	}
 
-	return user.IsAdmin, true
+	return user.IsOrganizationAdmin(), true
 }
 
 // IsMaskedEnabled ...
@@ -266,7 +266,7 @@ func (c *ApiController) checkKeyPermission(oldKey, key *object.Key) bool {
 		return false
 	}
 
-	if !user.IsAdmin && (key.User != user.Name || oldKey != nil && oldKey.User != user.Name) {
+	if !user.IsOrganizationAdmin() && (key.User != user.Name || oldKey != nil && oldKey.User != user.Name) {
 		c.ResponseError(c.T("auth:Unauthorized operation"))
 		return false
 	}

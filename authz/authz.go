@@ -138,6 +138,9 @@ p, *, *, POST, /api/grant-consent, *, *
 p, *, *, POST, /api/revoke-consent, *, *
 `
 
+		if conf.BuiltinIsolationEnabled() {
+			ruleText = strings.ReplaceAll(ruleText, "p, built-in, *, *, *, *, *\n", "")
+		}
 		sa := stringadapter.NewAdapter(ruleText)
 		// load all rules from string adapter to enforcer's memory
 		err = sa.LoadPolicy(Enforcer.GetModel())
@@ -181,6 +184,9 @@ func IsAllowed(subOwner string, subName string, method string, urlPath string, o
 			return false, nil
 		}
 
+		if conf.BuiltinIsolationEnabled() && appUser.Owner == "built-in" {
+			return appUser.IsOrganizationAdmin() && object.RestrictedBuiltinServiceAPI(method, urlPath, objOwner), nil
+		}
 		if appUser.IsGlobalAdmin() || appUser.Owner == objOwner {
 			return true, nil
 		}
@@ -200,7 +206,10 @@ func IsAllowed(subOwner string, subName string, method string, urlPath string, o
 			return true, nil
 		}
 
-		if user.IsAdmin && subOwner == objOwner {
+		if conf.BuiltinIsolationEnabled() && user.Owner == "built-in" {
+			return !user.IsForbidden && builtinUserAPIAllowed(user.Name, method, urlPath, objOwner, objName), nil
+		}
+		if user.IsOrganizationAdmin() && subOwner == objOwner {
 			return true, nil
 		}
 	}

@@ -221,7 +221,7 @@ func isApplicationAdmin(user *User, application *Application) (bool, error) {
 	if user.IsGlobalAdmin() {
 		return true, nil
 	}
-	if !user.IsAdmin || user.Owner != application.Organization {
+	if !user.IsOrganizationAdmin() || user.Owner != application.Organization {
 		return false, nil
 	}
 
@@ -417,7 +417,7 @@ func GetAllowedApplications(applications []*Application, userId string, lang str
 		return nil, errors.New(i18n.Translate(lang, "auth:Unauthorized operation"))
 	}
 
-	if user.IsAdmin {
+	if user.IsOrganizationAdmin() {
 		return applications, nil
 	}
 

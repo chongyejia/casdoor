@@ -47,6 +47,7 @@ jobs:
         run: |
           set -euo pipefail
           go version
+          go test ./conf ./object ./authz ./routers -run '^TestBuiltinIsolation' -count=1
           go test ./util/auditsecret -count=1
           go test ./object -run '^TestAuditRecord' -count=1
           go test ./idp -run '^TestLegacyLark' -count=1

@@ -203,6 +203,10 @@ func (c *ApiController) GetUser() {
 
 	var organization *object.Organization
 	if user != nil {
+		if conf.BuiltinIsolationEnabled() && object.IsAppUser(c.GetSessionUsername()) && user.Owner == "built-in" && (user.Name == "admin" || conf.IsBuiltinAdminID(user.Id)) {
+			c.ResponseError(c.T("auth:Unauthorized operation"))
+			return
+		}
 		organization, err = object.GetOrganizationByUser(user)
 		if err != nil {
 			c.ResponseError(err.Error())
@@ -329,6 +333,18 @@ func (c *ApiController) UpdateUser() {
 		user = mergedUser
 	}
 
+	if conf.BuiltinIsolationEnabled() && oldUser.Owner == "built-in" && object.IsAppUser(c.GetSessionUsername()) {
+		prepared, err := object.PrepareBuiltinServiceUserUpdate(oldUser, &user, columnsStr)
+		if err != nil {
+			c.ResponseError(err.Error())
+			return
+		}
+		user = *prepared
+		if columnsStr == "" {
+			columnsStr = "phone,country_code,avatar,display_name,wechat,properties"
+		}
+	}
+
 	if oldUser.Owner == "built-in" && oldUser.Name == "admin" && (user.Owner != "built-in" || user.Name != "admin") {
 		c.ResponseError(c.T("auth:Unauthorized operation"))
 		return
@@ -413,6 +429,25 @@ func (c *ApiController) AddUser() {
 		return
 	}
 
+	var provisioner *object.Application
+	if conf.BuiltinIsolationEnabled() && user.Owner == "built-in" {
+		verified, _ := c.Ctx.Input.GetData("builtinProvisioningApplication").(string)
+		if verified != "admin/app-built-in" || c.GetSessionUsername() != "app/app-built-in" {
+			c.ResponseError(c.T("auth:Unauthorized operation"))
+			return
+		}
+		provisioner, err = object.GetApplication(verified)
+		if err != nil {
+			c.ResponseError(err.Error())
+			return
+		}
+		if err := object.ValidateBuiltinProvisionedUser(provisioner, &user); err != nil {
+			c.ResponseError(err.Error())
+			return
+		}
+		object.NormalizeBuiltinProvisionedPhone(&user)
+	}
+
 	if err := checkQuotaForUser(); err != nil {
 		c.ResponseError(err.Error())
 		return
@@ -436,7 +471,13 @@ func (c *ApiController) AddUser() {
 		}
 	}
 
-	c.Data["json"] = wrapActionResponse(object.AddUser(&user, c.GetAcceptLanguage()))
+	if provisioner != nil {
+		// Metadata is supplied by the server after validating the submitted fields.
+		user.RegisterType, user.RegisterSource = "", ""
+		c.Data["json"] = wrapActionResponse(object.AddBuiltinUserFromService(provisioner, &user, c.GetAcceptLanguage()))
+	} else {
+		c.Data["json"] = wrapActionResponse(object.AddUser(&user, c.GetAcceptLanguage()))
+	}
 	c.ServeJSON()
 }
 

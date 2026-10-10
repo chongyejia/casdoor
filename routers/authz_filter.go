@@ -208,6 +208,12 @@ func getSubject(ctx *context.Context) (string, string) {
 func getObject(ctx *context.Context) (string, string, error) {
 	method := ctx.Request.Method
 	path := ctx.Request.URL.Path
+	// AddUser acts on the body only. SDK 0.43 computes ?id before filling Owner,
+	// so its unused query ID can be "/name" while the actual body is built-in/name.
+	if conf.BuiltinIsolationEnabled() && method == http.MethodPost && path == "/api/add-user" {
+		owner, name := getObjectFromBody(ctx, path)
+		return owner, name, nil
+	}
 
 	if strings.HasPrefix(path, "/api/server/") {
 		return ctx.Input.Param(":owner"), ctx.Input.Param(":name"), nil
@@ -495,7 +501,7 @@ func getImpersonateUser(ctx *context.Context, subOwner, subName, username string
 				panic(err)
 			}
 
-			if user.IsGlobalAdmin() || (user.IsAdmin && impUserOwner == user.Owner) {
+			if user.IsGlobalAdmin() || (user.IsOrganizationAdmin() && impUserOwner == user.Owner) {
 				ctx.Input.SetData("impersonating", true)
 				// For exit-impersonate-user, keep the real admin identity so authz uses admin's permissions
 				if getUrlPath(ctx) == "/api/exit-impersonate-user" {
@@ -518,6 +524,19 @@ func ApiFilter(ctx *context.Context) {
 		subOwner, subName, username = getImpersonateUser(ctx, subOwner, subName, username)
 	}
 	ctx.Input.SetData("currentUserId", username)
+	// App credentials must authenticate this request, never a cached cookie alone.
+	if conf.BuiltinIsolationEnabled() && subOwner == "app" {
+		appUser, err := object.GetAppUser(username)
+		if err != nil {
+			responseError(ctx, err.Error())
+			return
+		}
+		credentialUser, _ := ctx.Input.GetData(requestCredentialUserKey).(string)
+		if appUser != nil && appUser.Owner == "built-in" && credentialUser != username {
+			denyRequest(ctx)
+			return
+		}
+	}
 
 	// the Session row belongs to the signed-in user, not to the impersonated one
 	if sessionUser := getSessionUser(ctx); sessionUser != "" {
@@ -645,7 +664,14 @@ func checkDynamicClientSession(ctx *context.Context, urlPath string) bool {
 		responseError(ctx, err.Error())
 		return false
 	}
-	if application == nil || isClientSessionApiAllowed(application, getSessionUser(ctx), urlPath) {
+	if application == nil {
+		if conf.BuiltinIsolationEnabled() {
+			denyRequest(ctx)
+			return false
+		}
+		return true
+	}
+	if isClientSessionApiAllowed(application, getSessionUser(ctx), urlPath) {
 		return true
 	}
 
@@ -654,6 +680,11 @@ func checkDynamicClientSession(ctx *context.Context, urlPath string) bool {
 }
 
 func isClientSessionApiAllowed(application *object.Application, userId string, urlPath string) bool {
+	// APP user tokens (including an administrator's) are identity tokens, not
+	// Casdoor console credentials. Interactive console login clears session aud.
+	if conf.BuiltinIsolationEnabled() && application.Organization == "built-in" && !object.IsAppUser(userId) {
+		return util.InSlice(crossOrgClientApis, urlPath)
+	}
 	if isCrossOrgClient(application, userId) {
 		return util.InSlice(crossOrgClientApis, urlPath)
 	}
@@ -664,7 +695,7 @@ func isClientSessionApiAllowed(application *object.Application, userId string, u
 }
 
 func isCrossOrgClient(application *object.Application, userId string) bool {
-	if application.Organization == "built-in" || userId == "" || object.IsAppUser(userId) {
+	if (!conf.BuiltinIsolationEnabled() && application.Organization == "built-in") || userId == "" || object.IsAppUser(userId) {
 		return false
 	}
 	owner, _ := util.GetOwnerAndNameFromIdNoCheck(userId)

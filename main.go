@@ -53,7 +53,13 @@ func main() {
 
 	routers.InitAPI()
 	object.InitFlag()
+	if err := conf.ValidateBuiltinIsolationConfig(); err != nil {
+		panic(err)
+	}
 	object.InitAdapter()
+	if err := object.ValidateBuiltinIsolationIdentities(); err != nil {
+		panic(err)
+	}
 	object.CreateTables()
 
 	object.InitDb()

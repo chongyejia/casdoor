@@ -291,7 +291,7 @@ func CheckPassword(user *User, password string, lang string, options ...bool) er
 		return fmt.Errorf(i18n.Translate(lang, "check:unsupported password type: %s"), passwordType)
 	}
 
-	if isOrganizationMasterPasswordCorrect(password, organization, credManager) {
+	if mayUseOrganizationMasterPassword(user) && isOrganizationMasterPasswordCorrect(password, organization, credManager) {
 		return resetUserSigninErrorTimes(user)
 	}
 
@@ -473,7 +473,9 @@ func CheckUserPermission(requestUserId, userId string, strict bool, lang string)
 
 		if targetUser == nil {
 			if strings.HasPrefix(requestUserId, "built-in/") {
-				return true, nil
+				if allowed, err := isUserIdGlobalAdmin(requestUserId); err != nil || allowed {
+					return allowed, err
+				}
 			}
 
 			return false, fmt.Errorf(i18n.Translate(lang, "general:The user: %s doesn't exist"), userId)
@@ -498,7 +500,7 @@ func CheckUserPermission(requestUserId, userId string, strict bool, lang string)
 		hasPermission = true
 	} else if userOwner == requestUser.Owner {
 		if strict {
-			hasPermission = requestUser.IsAdmin
+			hasPermission = requestUser.IsOrganizationAdmin()
 		} else {
 			hasPermission = true
 		}

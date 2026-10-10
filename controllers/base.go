@@ -21,6 +21,7 @@ import (
 
 	"github.com/beego/beego/v2/core/logs"
 	"github.com/beego/beego/v2/server/web"
+	"github.com/casdoor/casdoor/conf"
 	"github.com/casdoor/casdoor/mcpself"
 	"github.com/casdoor/casdoor/object"
 	"github.com/casdoor/casdoor/util"
@@ -54,7 +55,7 @@ func (c *ApiController) IsAdmin() bool {
 		return false
 	}
 
-	return isGlobalAdmin || user.IsAdmin
+	return isGlobalAdmin || user.IsOrganizationAdmin()
 }
 
 // IsAdminOf checks that the current user administers user2: a global admin does, an
@@ -65,7 +66,7 @@ func (c *ApiController) IsAdminOf(user2 *object.User) bool {
 		return true
 	}
 
-	return user != nil && user2 != nil && user.IsAdmin && user.Owner == user2.Owner
+	return user != nil && user2 != nil && user.IsOrganizationAdmin() && user.Owner == user2.Owner
 }
 
 // IsAdminOfOrganization checks that the current user administers the organization: a
@@ -76,7 +77,7 @@ func (c *ApiController) IsAdminOfOrganization(organization string) bool {
 		return true
 	}
 
-	return user != nil && user.IsAdmin && user.Owner == organization
+	return user != nil && user.IsOrganizationAdmin() && user.Owner == organization
 }
 
 func (c *ApiController) IsAdminOrSelf(user2 *object.User) bool {
@@ -89,7 +90,7 @@ func (c *ApiController) IsAdminOrSelf(user2 *object.User) bool {
 		return false
 	}
 
-	return user.Owner == user2.Owner && (user.IsAdmin || user.Name == user2.Name)
+	return user.Owner == user2.Owner && (user.IsOrganizationAdmin() || user.Name == user2.Name)
 }
 
 // requireOrganizationPermission checks that the current user may create an object belonging
@@ -101,7 +102,7 @@ func (c *ApiController) requireOrganizationPermission(organization string) bool 
 		return true
 	}
 
-	if user == nil || user.Owner != organization {
+	if user == nil || user.Owner != organization || (conf.BuiltinIsolationEnabled() && user.Owner == "built-in" && !user.IsOrganizationAdmin()) {
 		c.ResponseError(c.T("auth:Unauthorized operation"))
 		return false
 	}

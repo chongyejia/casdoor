@@ -1135,7 +1135,7 @@ func (user *User) IsAdminUser() bool {
 		return false
 	}
 
-	return user.IsAdmin || user.IsGlobalAdmin()
+	return user.IsOrganizationAdmin() || user.IsGlobalAdmin()
 }
 
 func IsAppUser(userId string) bool {
@@ -1161,7 +1161,7 @@ func GetAppUser(userId string) (*User, error) {
 		return nil, err
 	}
 
-	return &User{Owner: application.Organization, Name: userId, IsAdmin: true}, nil
+	return &User{Owner: application.Organization, Name: userId, IsAdmin: true, builtinServiceIdentity: IsBuiltinProvisioner(application)}, nil
 }
 
 func getAppUserApplication(name string) (*Application, error) {

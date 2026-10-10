@@ -60,6 +60,9 @@ func InitUserManager() {
 }
 
 type User struct {
+	// Only GetAppUser can set this capability; JSON and database rows cannot.
+	builtinServiceIdentity bool `xorm:"-" json:"-"`
+
 	Owner       string `xorm:"varchar(100) notnull pk" json:"owner"`
 	Name        string `xorm:"varchar(255) notnull pk" json:"name"`
 	CreatedTime string `xorm:"varchar(100) index" json:"createdTime"`
@@ -1016,6 +1019,13 @@ func UpdateUserForAllFields(id string, user *User) (bool, error) {
 }
 
 func AddUser(user *User, lang string) (bool, error) {
+	return addUser(user, lang, false)
+}
+
+func addUser(user *User, lang string, restrictedProvisioning bool) (bool, error) {
+	if conf.BuiltinIsolationEnabled() && user.Owner == "built-in" && !restrictedProvisioning {
+		return false, errors.New("builtin users require the restricted server provisioning endpoint")
+	}
 	if user.Id == "" {
 		application, err := GetApplicationByUser(user)
 		if err != nil {
@@ -1058,7 +1068,7 @@ func AddUser(user *User, lang string) (bool, error) {
 		}
 	}
 
-	if organization.Name == "built-in" && !organization.HasPrivilegeConsent && user.Name != "admin" {
+	if organization.Name == "built-in" && !organization.HasPrivilegeConsent && user.Name != "admin" && !restrictedProvisioning {
 		return false, errors.New(i18n.Translate(lang, "organization:adding a new user to the 'built-in' organization is currently disabled. Please note: all users in the 'built-in' organization are global administrators in Casdoor. Refer to the docs: https://casdoor.org/docs/basic/core-concepts#how-does-casdoor-manage-itself. If you still wish to create a user for the 'built-in' organization, go to the organization's settings page and enable the 'Has privilege consent' option."))
 	}
 
@@ -1468,15 +1478,14 @@ func (user *User) GetFriendlyName() string {
 }
 
 func isUserIdGlobalAdmin(userId string) (bool, error) {
-	if strings.HasPrefix(userId, "built-in/") {
+	if !conf.BuiltinIsolationEnabled() && strings.HasPrefix(userId, "built-in/") {
 		return true, nil
 	}
-
-	appUser, err := GetAppUser(userId)
+	user, err := GetUserOrAppUser(userId)
 	if err != nil {
 		return false, err
 	}
-	return appUser.IsGlobalAdmin(), nil
+	return user.IsGlobalAdmin(), nil
 }
 
 func ExtendUserWithRolesAndPermissions(user *User) (err error) {
@@ -1621,6 +1630,9 @@ func (user *User) IsGlobalAdmin() bool {
 		return false
 	}
 
+	if conf.BuiltinIsolationEnabled() {
+		return user.Owner == "built-in" && !user.IsForbidden && !user.IsDeleted && conf.IsBuiltinAdminID(user.Id)
+	}
 	return user.Owner == "built-in"
 }
 

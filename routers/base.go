@@ -150,6 +150,9 @@ func getUsernameByClientIdSecret(ctx *context.Context) (string, error) {
 		return "", fmt.Errorf("Incorrect client secret for application: %s", application.Name)
 	}
 
+	if object.IsBuiltinProvisioner(application) {
+		ctx.Input.SetData("builtinProvisioningApplication", application.GetId())
+	}
 	return object.GetAppUserId(application), nil
 }
 
