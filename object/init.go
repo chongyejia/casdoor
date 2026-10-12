@@ -26,6 +26,9 @@ import (
 )
 
 func InitDb() {
+	if startupMode != "" {
+		panic("automatic identity seeding forbidden in controlled startup")
+	}
 	existed := initBuiltInOrganization()
 	if !existed {
 		initBuiltInPermission()
@@ -601,4 +604,26 @@ func initBuiltInApiEnforcer() {
 	if err != nil {
 		panic(err)
 	}
+}
+
+// Controlled startup checks existing identity anchors without seeding records.
+func InitRuntimeExistingDb() error {
+	org, err := GetOrganization("admin/built-in")
+	if err != nil || org == nil {
+		return fmt.Errorf("existing built-in organization required")
+	}
+	for _, id := range []string{"built-in/api-model-built-in", "built-in/user-model-built-in"} {
+		item, err := GetModel(id)
+		if err != nil || item == nil {
+			return fmt.Errorf("existing startup model required")
+		}
+	}
+	for _, id := range []string{"built-in/api-enforcer-built-in", "built-in/user-enforcer-built-in"} {
+		item, err := GetEnforcer(id)
+		if err != nil || item == nil {
+			return fmt.Errorf("existing startup enforcer required")
+		}
+	}
+	initWebAuthn()
+	return nil
 }

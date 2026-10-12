@@ -56,32 +56,68 @@ func main() {
 	if err := conf.ValidateBuiltinIsolationConfig(); err != nil {
 		panic(err)
 	}
+	startup, startupErr := object.BeginControlledStartup()
+	if startupErr != nil {
+		panic(startupErr)
+	}
 	object.InitAdapter()
 	if err := object.ValidateBuiltinIsolationIdentities(); err != nil {
 		panic(err)
 	}
-	object.CreateTables()
-
-	object.InitDb()
-
-	// Handle export command
-	if object.ShouldExportData() {
-		exportPath := object.GetExportFilePath()
-		err := object.DumpToFile(exportPath)
-		if err != nil {
-			panic(fmt.Sprintf("Error exporting data to %s: %v", exportPath, err))
+	if startup != nil {
+		if object.StartupServeWithoutDDL() {
+			if err := startup.VerifyServe(); err != nil {
+				panic(err)
+			}
+			if err := object.InitRuntimeExistingDb(); err != nil {
+				panic(err)
+			}
+			// Finish both policy loads before any background service can write.
+			authz.InitApi()
+			object.InitUserManager()
+		} else {
+			if err := startup.VerifyBefore(); err != nil {
+				panic(err)
+			}
+			object.CreateTables()
+			if err := object.InitRuntimeExistingDb(); err != nil {
+				panic(err)
+			}
+			authz.InitApi()
+			object.InitUserManager()
+			if err := startup.CompleteMigration(); err != nil {
+				panic(err)
+			}
+			// No HTTP/LDAP/radius/sync/log/webhook workers or traffic in this mode.
+			return
 		}
-		fmt.Printf("Data exported successfully to %s\n", exportPath)
-		return
+	} else {
+		object.CreateTables()
+
+		object.InitDb()
+
+		// Handle export command
+		if object.ShouldExportData() {
+			exportPath := object.GetExportFilePath()
+			err := object.DumpToFile(exportPath)
+			if err != nil {
+				panic(fmt.Sprintf("Error exporting data to %s: %v", exportPath, err))
+			}
+			fmt.Printf("Data exported successfully to %s\n", exportPath)
+			return
+		}
+
 	}
 
 	object.InitDefaultStorageProvider()
 	object.InitLogProviders()
 	object.InitLdapAutoSynchronizer()
 	proxy.InitHttpClient()
-	authz.InitApi()
-	object.InitUserManager()
-	object.InitFromFile()
+	if !object.StartupServeWithoutDDL() {
+		authz.InitApi()
+		object.InitUserManager()
+		object.InitFromFile()
+	}
 	object.InitCleanupTokens()
 	object.InitCleanupRecords()
 	object.InitCleanupDeviceAuthMap()
@@ -143,10 +179,13 @@ func main() {
 	// logs.SetLevel(logs.LevelInformational)
 	logs.SetLogFuncCall(false)
 
-	err = util.StopOldInstance(port)
-	if err != nil {
-		panic(err)
+	if startup == nil {
+		err = util.StopOldInstance(port)
+		if err != nil {
+			panic(err)
+		}
 	}
+	// Controlled serve never automatically signals another instance on bind conflict.
 
 	go ldap.StartLdapServer()
 	go radius.StartRadiusServer()

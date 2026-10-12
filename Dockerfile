@@ -13,8 +13,9 @@ RUN node --test verify-build.test.mjs \
 FROM --platform=$BUILDPLATFORM golang:1.25.8@sha256:3ac2864710f25e84381bf5d4272261c7ba73ada0339d62034df4de20dabb33ca AS BACK
 WORKDIR /go/src/casdoor
 
-# Copy only go.mod and go.sum first for dependency caching
+# Include the pinned local module before resolving dependencies.
 COPY go.mod go.sum ./
+COPY third_party/xorm-adapter ./third_party/xorm-adapter
 RUN go mod download
 
 # Copy source files

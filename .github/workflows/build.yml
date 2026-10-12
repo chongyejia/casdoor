@@ -13,6 +13,9 @@ on:
 
 jobs:
   go-tests:
+    # This upstream suite starts services and runs the broad test selection.
+    # Fork validation uses fork-source-build.yml with isolated exact tests.
+    if: github.repository == 'casdoor/casdoor'
     name: Running Go tests
     runs-on: ubuntu-latest
     services:

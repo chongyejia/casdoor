@@ -42,19 +42,29 @@ jobs:
           go-version: '1.25.8'
           cache: true
 
-      - name: Compile and test changed identity packages
+      - name: Fetch declared dependencies before isolation
         shell: bash
         run: |
           set -euo pipefail
           go version
-          go test ./conf ./object ./authz ./routers -run '^TestBuiltinIsolation' -count=1
-          go test ./util/auditsecret -count=1
-          go test ./object -run '^TestAuditRecord' -count=1
-          go test ./idp -run '^TestLegacyLark' -count=1
-          go test ./object -run '^Test(LarkMiniProgram|TypedLark|LegacyLark)' -count=1
-          go test ./object -run '^TestPasswordlessMaster(Grant|PasswordGrant)' -count=1
-          go test ./object -run '^TestTokenLookupIDSessionHints$' -count=1
-          go build -p 2 ./...
+          go mod download
+
+      - name: Test exact identity allowlist without outbound network
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/casdoor-test-home" "$RUNNER_TEMP/casdoor-test-cache"
+          parent_netns="$(readlink /proc/self/ns/net)"
+          sudo -n unshare --net -- /usr/bin/env -i \
+            PATH="$(go env GOROOT)/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+            HOME="$RUNNER_TEMP/casdoor-test-home" \
+            GOCACHE="$RUNNER_TEMP/casdoor-test-cache" \
+            GOMODCACHE="$(go env GOMODCACHE)" \
+            GOROOT="$(go env GOROOT)" \
+            GOPATH="$(go env GOPATH)" \
+            GOTOOLCHAIN=local GOPROXY=off GOSUMDB=off GOMAXPROCS=4 \
+            CASDOOR_PARENT_NETNS="$parent_netns" \
+            /bin/bash ci/test-identity-offline.sh
 
       - name: Build local container image
         shell: bash

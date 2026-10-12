@@ -1,6 +1,7 @@
 package object
 
 import (
+	"github.com/casbin/casbin/v2/model"
 	xormadapter "github.com/casdoor/xorm-adapter/v3"
 	"github.com/xorm-io/xorm"
 )
@@ -148,4 +149,12 @@ func (a *SafeAdapter) buildCasbinRule(ptype string, rule []string) *xormadapter.
 	}
 
 	return &line
+}
+
+// Never delegate bulk save to DROP/Sync2 on runtime restarts or API calls.
+func (a *SafeAdapter) SavePolicy(m model.Model) error {
+	if StartupServeWithoutDDL() {
+		return a.Adapter.SavePolicyWithoutDDL(m)
+	}
+	return a.Adapter.SavePolicy(m)
 }

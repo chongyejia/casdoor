@@ -54,12 +54,22 @@ func InitFlag() {
 	configPathPtr := flag.String("config", defaultConfigPath, "set it to \"/your/path/app.conf\" if your config file is not in: \"/conf/app.conf\"")
 	exportDataPtr := flag.Bool("export", false, "export database to JSON file and exit (use -exportPath to specify custom location)")
 	exportFilePathPtr := flag.String("exportPath", defaultExportFilePath, "path to the exported data file (used with -export)")
+	startupModePtr := flag.String("startupMode", "", "explicit migration-only or serve-without-ddl; empty retains legacy startup")
+	startupManifestPtr := flag.String("startupManifest", "", "approved non-secret startup manifest")
+	startupManifestSHA256Ptr := flag.String("startupManifestSHA256", "", "exact approved manifest checksum")
+	startupAttemptPtr := flag.String("startupAttempt", "", "approved persisted migration attempt identifier")
+	startupAttemptDirectoryPtr := flag.String("startupAttemptDirectory", "", "preexisting protected persistent attempt directory")
 	flag.Parse()
 
 	createDatabase = *createDatabasePtr
 	configPath = *configPathPtr
 	exportData = *exportDataPtr
 	exportFilePath = *exportFilePathPtr
+	startupMode = *startupModePtr
+	startupManifestPath = *startupManifestPtr
+	startupManifestSHA256 = *startupManifestSHA256Ptr
+	startupAttemptID = *startupAttemptPtr
+	startupAttemptDirectory = *startupAttemptDirectoryPtr
 
 	// Load beego config from the specified config path
 	err := web.LoadAppConfig("ini", configPath)
@@ -119,6 +129,9 @@ func InitAdapter() {
 }
 
 func CreateTables() {
+	if StartupServeWithoutDDL() {
+		panic("schema synchronization forbidden in serve-without-ddl")
+	}
 	if createDatabase {
 		err := ormer.CreateDatabase()
 		if err != nil {
@@ -238,6 +251,16 @@ func createDatabaseForPostgres(driverName string, dataSourceName string, dbName 
 }
 
 func (a *Ormer) CreateDatabase() error {
+	if StartupServeWithoutDDL() {
+		return fmt.Errorf("database creation forbidden in serve-without-ddl")
+	}
+	enabled, _, _, err := migrationLockOptions(a.driverName)
+	if err != nil {
+		return err
+	}
+	if enabled {
+		return fmt.Errorf("migration lock mode requires a pre-existing database")
+	}
 	if a.driverName == "postgres" {
 		return nil
 	}
@@ -276,14 +299,17 @@ func setPostgresSchema(engine *xorm.Engine, dataSourceName string) error {
 }
 
 func (a *Ormer) open() error {
-	dataSourceName := a.dataSourceName + a.dbName
-	if a.driverName != "mysql" {
-		dataSourceName = a.dataSourceName
+	dataSourceName, err := migrationDataSourceName(a.driverName, a.dataSourceName, a.dbName, a.driverName == "mysql")
+	if err != nil {
+		return err
 	}
 
 	driverName := a.driverName
 	if driverName == "sqlite3" {
 		driverName = "sqlite"
+	}
+	if err := validateControlledDatabaseTarget(driverName, dataSourceName); err != nil {
+		return err
 	}
 	engine, err := xorm.NewEngine(driverName, dataSourceName)
 	if err != nil {
@@ -302,6 +328,13 @@ func (a *Ormer) open() error {
 }
 
 func (a *Ormer) openFromDb(db *sql.DB) error {
+	enabled, _, _, err := migrationLockOptions(a.driverName)
+	if err != nil {
+		return err
+	}
+	if enabled {
+		return fmt.Errorf("migration lock mode rejects an externally opened connection pool")
+	}
 	dataSourceName := a.dataSourceName + a.dbName
 	if a.driverName != "mysql" {
 		dataSourceName = a.dataSourceName
@@ -335,6 +368,9 @@ func (a *Ormer) close() {
 }
 
 func (a *Ormer) createTable() {
+	if StartupServeWithoutDDL() {
+		panic("schema synchronization forbidden in serve-without-ddl")
+	}
 	showSql := conf.GetConfigBool("showSql")
 	a.Engine.ShowSQL(showSql)
 

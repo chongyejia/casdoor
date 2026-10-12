@@ -147,6 +147,9 @@ func (adapter *Adapter) GetId() string {
 }
 
 func (adapter *Adapter) InitAdapter() error {
+	if err := ValidateStartupAdapterBinding(adapter); err != nil {
+		return err
+	}
 	if adapter.Adapter != nil && adapter.engine != nil {
 		return nil
 	}
@@ -156,8 +159,12 @@ func (adapter *Adapter) InitAdapter() error {
 	if adapter.UseSameDb || adapter.isBuiltIn() {
 		driverName = conf.GetConfigString("driverName")
 		dataSourceName = conf.GetConfigString("dataSourceName")
-		if conf.GetConfigString("driverName") == "mysql" {
-			dataSourceName = dataSourceName + conf.GetConfigString("dbName")
+		if driverName == "mysql" {
+			resolved, err := migrationDataSourceName(driverName, dataSourceName, conf.GetConfigString("dbName"), true)
+			if err != nil {
+				return err
+			}
+			dataSourceName = resolved
 		}
 	} else {
 		driverName = adapter.DatabaseType
@@ -193,11 +200,14 @@ func (adapter *Adapter) InitAdapter() error {
 		}
 	}
 
-	if !isCloudIntranet {
-		dataSourceName = strings.ReplaceAll(dataSourceName, "dbi.", "db.")
+	resolved, err := resolveAdapterDataSourceName(driverName, dataSourceName)
+	if err != nil {
+		return err
 	}
-
-	dataSourceName = conf.ReplaceDataSourceNameByDocker(dataSourceName)
+	dataSourceName = resolved
+	if err := validateControlledDatabaseTarget(driverName, dataSourceName); err != nil {
+		return err
+	}
 	engine, err := xorm.NewEngine(driverName, dataSourceName)
 	if err != nil {
 		return err
@@ -212,7 +222,12 @@ func (adapter *Adapter) InitAdapter() error {
 
 	tableName := adapter.Table
 
-	xa, err := xormadapter.NewAdapterByEngineWithTableName(engine, tableName, "")
+	var xa *xormadapter.Adapter
+	if StartupServeWithoutDDL() {
+		xa, err = xormadapter.NewAdapterByEngineWithExistingTable(engine, tableName, "")
+	} else {
+		xa, err = xormadapter.NewAdapterByEngineWithTableName(engine, tableName, "")
+	}
 	if err != nil {
 		_ = engine.Close()
 		return err
@@ -222,6 +237,15 @@ func (adapter *Adapter) InitAdapter() error {
 	adapter.Adapter = xa
 
 	return nil
+}
+
+// Keep the pre-connection startup check and the actual adapter path identical.
+func resolveAdapterDataSourceName(driverName, dataSourceName string) (string, error) {
+	if !isCloudIntranet {
+		dataSourceName = strings.ReplaceAll(dataSourceName, "dbi.", "db.")
+	}
+	dataSourceName = conf.ReplaceDataSourceNameByDocker(dataSourceName)
+	return migrationDataSourceName(driverName, dataSourceName, "", false)
 }
 
 func adapterChangeTrigger(owner string, oldName string, newName string) error {

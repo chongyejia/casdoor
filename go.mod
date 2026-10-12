@@ -318,3 +318,6 @@ require (
 	modernc.org/token v1.0.1 // indirect
 	rsc.io/binaryregexp v0.2.0 // indirect
 )
+
+// Local v3.1.0 extension: reviewed existing-table and transactional policy save.
+replace github.com/casdoor/xorm-adapter/v3 => ./third_party/xorm-adapter

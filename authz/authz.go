@@ -33,6 +33,13 @@ func InitApi() {
 	}
 
 	Enforcer = e.Enforcer
+	if object.StartupServeWithoutDDL() {
+		// The approved persisted policy was checked before loading. Never reseed.
+		if err := object.VerifyLoadedStartupAPIPolicy(Enforcer); err != nil {
+			panic(err)
+		}
+		return
+	}
 	Enforcer.ClearPolicy()
 
 	// if len(Enforcer.GetPolicy()) == 0 {
