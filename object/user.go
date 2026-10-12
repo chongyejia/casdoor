@@ -42,6 +42,9 @@ import (
 const (
 	UserPropertiesWechatUnionId = "wechatUnionId"
 	UserPropertiesWechatOpenId  = "wechatOpenId"
+	UserPropertiesLarkUnionId   = "larkUnionId"
+	UserPropertiesLarkOpenId    = "larkOpenId"
+	UserPropertiesLarkUserId    = "larkUserId"
 )
 
 const UserEnforcerId = "built-in/user-enforcer-built-in"

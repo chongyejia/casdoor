@@ -109,6 +109,9 @@ const authInfo = {
     endpoint: "https://open.feishu.cn/open-apis/authen/v1/index",
     endpoint2: "https://accounts.larksuite.com/open-apis/authen/v1/authorize",
   },
+  LarkMiniProgram: {
+    endpoint: "https://open.feishu.cn/open-apis",
+  },
   GitLab: {
     scope: "read_user+profile",
     endpoint: "https://gitlab.com/oauth/authorize",
