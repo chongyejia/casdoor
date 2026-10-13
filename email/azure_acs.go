@@ -26,7 +26,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
+	"github.com/casdoor/casdoor/util"
 )
 
 const (
@@ -96,15 +96,17 @@ func NewAzureACSEmailProvider(accessKey string, endpoint string) *AzureACSEmailP
 	}
 }
 
-func newEmail(fromAddress string, toAddress string, subject string, content string) *Email {
+func newEmail(fromAddress string, toAddress []string, subject string, content string) *Email {
+	var to []EmailAddress
+	for _, addr := range toAddress {
+		to = append(to, EmailAddress{
+			DisplayName: addr,
+			Address:     addr,
+		})
+	}
 	return &Email{
 		Recipients: Recipients{
-			To: []EmailAddress{
-				{
-					DisplayName: toAddress,
-					Address:     toAddress,
-				},
-			},
+			To: to,
 		},
 		SenderAddress: fromAddress,
 		Content: Content{
@@ -116,7 +118,7 @@ func newEmail(fromAddress string, toAddress string, subject string, content stri
 	}
 }
 
-func (a *AzureACSEmailProvider) Send(fromAddress string, fromName string, toAddress string, subject string, content string) error {
+func (a *AzureACSEmailProvider) Send(fromAddress string, fromName string, toAddress []string, subject string, content string) error {
 	email := newEmail(fromAddress, toAddress, subject, content)
 
 	postBody, err := json.Marshal(email)
@@ -139,7 +141,7 @@ func (a *AzureACSEmailProvider) Send(fromAddress string, fromName string, toAddr
 	}
 
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("repeatability-request-id", uuid.New().String())
+	req.Header.Set("repeatability-request-id", util.GenerateUUID())
 	req.Header.Set("repeatability-first-sent", time.Now().UTC().Format(http.TimeFormat))
 
 	client := &http.Client{}

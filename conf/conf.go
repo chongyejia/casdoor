@@ -15,21 +15,25 @@
 package conf
 
 import (
+	_ "embed"
 	"fmt"
 	"os"
 	"runtime"
 	"strconv"
 	"strings"
 
-	"github.com/beego/beego"
+	"github.com/beego/beego/v2/server/web"
 )
+
+//go:embed waf.conf
+var WafConf string
 
 func init() {
 	// this array contains the beego configuration items that may be modified via env
 	presetConfigItems := []string{"httpport", "appname"}
 	for _, key := range presetConfigItems {
 		if value, ok := os.LookupEnv(key); ok {
-			err := beego.AppConfig.Set(key, value)
+			err := web.AppConfig.Set(key, value)
 			if err != nil {
 				panic(err)
 			}
@@ -42,12 +46,13 @@ func GetConfigString(key string) string {
 		return value
 	}
 
-	res := beego.AppConfig.String(key)
+	res, _ := web.AppConfig.String(key)
 	if res == "" {
 		if key == "staticBaseUrl" {
 			res = "https://cdn.casbin.org"
 		} else if key == "logConfig" {
-			res = fmt.Sprintf("{\"filename\": \"logs/%s.log\", \"maxdays\":99999, \"perm\":\"0770\"}", beego.AppConfig.String("appname"))
+			appname, _ := web.AppConfig.String("appname")
+			res = fmt.Sprintf("{\"filename\": \"logs/%s.log\", \"maxdays\":99999, \"perm\":\"0770\"}", appname)
 		}
 	}
 
@@ -66,7 +71,21 @@ func GetConfigBool(key string) bool {
 func GetConfigInt64(key string) (int64, error) {
 	value := GetConfigString(key)
 	num, err := strconv.ParseInt(value, 10, 64)
-	return num, err
+	if err != nil {
+		return 0, fmt.Errorf("GetConfigInt64(%s) error, %s", key, err.Error())
+	}
+
+	return num, nil
+}
+
+// GetVerificationCodeTimeout falls back to 10 minutes when the config item is missing or invalid
+func GetVerificationCodeTimeout() int64 {
+	timeoutInMinutes, err := GetConfigInt64("verificationCodeTimeout")
+	if err != nil || timeoutInMinutes <= 0 {
+		return 10
+	}
+
+	return timeoutInMinutes
 }
 
 func GetConfigDataSourceName() string {
@@ -87,6 +106,13 @@ func ReplaceDataSourceNameByDocker(dataSourceName string) string {
 	return dataSourceName
 }
 
+func GetAcceptLanguage(acceptLanguage string) string {
+	if len(acceptLanguage) > 2 {
+		acceptLanguage = acceptLanguage[0:2]
+	}
+	return GetLanguage(acceptLanguage)
+}
+
 func GetLanguage(language string) string {
 	if language == "" || language == "*" {
 		return "en"
@@ -101,6 +127,10 @@ func GetLanguage(language string) string {
 
 func IsDemoMode() bool {
 	return strings.ToLower(GetConfigString("isDemoMode")) == "true"
+}
+
+func IsDemoDatabase() bool {
+	return GetConfigString("dbName") == "casdoor_demo"
 }
 
 func GetConfigBatchSize() int {

@@ -33,20 +33,35 @@ func InitApi() {
 	}
 
 	Enforcer = e.Enforcer
+	if object.StartupServeWithoutDDL() {
+		// The approved persisted policy was checked before loading. Never reseed.
+		if err := object.VerifyLoadedStartupAPIPolicy(Enforcer); err != nil {
+			panic(err)
+		}
+		return
+	}
 	Enforcer.ClearPolicy()
 
 	// if len(Enforcer.GetPolicy()) == 0 {
 	if true {
 		ruleText := `
 p, built-in, *, *, *, *, *
-p, app, *, *, *, *, *
+p, app-dcr, *, *, /api/login/oauth/*, *, *
+p, app-dcr, *, *, /api/get-oauth-token, *, *
+p, app-dcr, *, *, /api/userinfo, *, *
+p, app-dcr, *, *, /api/get-application, *, *
 p, *, *, POST, /api/signup, *, *
 p, *, *, GET, /api/get-email-and-phone, *, *
 p, *, *, POST, /api/login, *, *
 p, *, *, GET, /api/get-app-login, *, *
 p, *, *, POST, /api/logout, *, *
 p, *, *, GET, /api/logout, *, *
+p, *, *, POST, /api/sso-logout, *, *
+p, *, *, GET, /api/sso-logout, *, *
 p, *, *, POST, /api/callback, *, *
+p, *, *, POST, /api/device-auth, *, *
+p, *, *, POST, /api/cancel-device-auth, *, *
+p, *, *, POST, /api/device-auth-complete, *, *
 p, *, *, GET, /api/get-account, *, *
 p, *, *, GET, /api/userinfo, *, *
 p, *, *, GET, /api/user, *, *
@@ -56,32 +71,53 @@ p, *, *, GET, /api/get-qrcode, *, *
 p, *, *, GET, /api/get-webhook-event, *, *
 p, *, *, GET, /api/get-captcha-status, *, *
 p, *, *, *, /api/login/oauth, *, *
+p, *, *, *, /api/oauth/register, *, *
 p, *, *, GET, /api/get-application, *, *
 p, *, *, GET, /api/get-organization-applications, *, *
 p, *, *, GET, /api/get-user, *, *
 p, *, *, GET, /api/get-user-application, *, *
+p, *, *, POST, /api/upload-users, *, *
 p, *, *, GET, /api/get-resources, *, *
 p, *, *, GET, /api/get-records, *, *
 p, *, *, GET, /api/get-product, *, *
+p, *, *, GET, /api/get-products, *, *
 p, *, *, POST, /api/buy-product, *, *
+p, *, *, GET, /api/get-order, *, *
+p, *, *, GET, /api/get-orders, *, *
+p, *, *, GET, /api/get-user-orders, *, *
 p, *, *, GET, /api/get-payment, *, *
-p, *, *, POST, /api/update-payment, *, *
 p, *, *, POST, /api/invoice-payment, *, *
 p, *, *, POST, /api/notify-payment, *, *
+p, *, *, POST, /api/place-order, *, *
+p, *, *, POST, /api/cancel-order, *, *
+p, *, *, POST, /api/pay-order, *, *
+p, *, *, POST, /api/validate-coupon, *, *
 p, *, *, POST, /api/unlink, *, *
 p, *, *, POST, /api/set-password, *, *
 p, *, *, POST, /api/send-verification-code, *, *
 p, *, *, GET, /api/get-captcha, *, *
 p, *, *, POST, /api/verify-captcha, *, *
 p, *, *, POST, /api/verify-code, *, *
+p, *, *, POST, /api/v1/traces, *, *
+p, *, *, POST, /api/v1/metrics, *, *
+p, *, *, POST, /api/v1/logs, *, *
 p, *, *, POST, /api/reset-email-or-phone, *, *
 p, *, *, POST, /api/upload-resource, *, *
 p, *, *, GET, /.well-known/openid-configuration, *, *
+p, *, *, GET, /.well-known/oauth-authorization-server, *, *
+p, *, *, GET, /.well-known/oauth-protected-resource, *, *
+p, *, *, GET, /.well-known/webfinger, *, *
 p, *, *, *, /.well-known/jwks, *, *
+p, *, *, GET, /.well-known/:application/openid-configuration, *, *
+p, *, *, GET, /.well-known/:application/oauth-authorization-server, *, *
+p, *, *, GET, /.well-known/:application/oauth-protected-resource, *, *
+p, *, *, GET, /.well-known/:application/webfinger, *, *
+p, *, *, *, /.well-known/:application/jwks, *, *
 p, *, *, GET, /api/get-saml-login, *, *
 p, *, *, POST, /api/acs, *, *
 p, *, *, GET, /api/saml/metadata, *, *
 p, *, *, *, /api/saml/redirect, *, *
+p, *, *, *, /api/saml/logout, *, *
 p, *, *, *, /cas, *, *
 p, *, *, *, /scim, *, *
 p, *, *, *, /api/webauthn, *, *
@@ -92,15 +128,26 @@ p, *, *, *, /api/metrics, *, *
 p, *, *, GET, /api/get-pricing, *, *
 p, *, *, GET, /api/get-plan, *, *
 p, *, *, GET, /api/get-subscription, *, *
+p, *, *, GET, /api/get-transactions, *, *
+p, *, *, GET, /api/get-transaction, *, *
 p, *, *, GET, /api/get-provider, *, *
 p, *, *, GET, /api/get-organization-names, *, *
+p, *, *, GET, /api/get-organizations, *, *
 p, *, *, GET, /api/get-all-objects, *, *
 p, *, *, GET, /api/get-all-actions, *, *
 p, *, *, GET, /api/get-all-roles, *, *
+p, *, *, GET, /api/run-casbin-command, *, *
+p, *, *, POST, /api/refresh-engines, *, *
 p, *, *, GET, /api/get-invitation-info, *, *
 p, *, *, GET, /api/faceid-signin-begin, *, *
+p, *, *, GET, /api/kerberos-login, *, *
+p, *, *, POST, /api/grant-consent, *, *
+p, *, *, POST, /api/revoke-consent, *, *
 `
 
+		if conf.BuiltinIsolationEnabled() {
+			ruleText = strings.ReplaceAll(ruleText, "p, built-in, *, *, *, *, *\n", "")
+		}
 		sa := stringadapter.NewAdapter(ruleText)
 		// load all rules from string adapter to enforcer's memory
 		err = sa.LoadPolicy(Enforcer.GetModel())
@@ -118,43 +165,122 @@ p, *, *, GET, /api/faceid-signin-begin, *, *
 	}
 }
 
-func IsAllowed(subOwner string, subName string, method string, urlPath string, objOwner string, objName string) bool {
+func IsAllowed(subOwner string, subName string, method string, urlPath string, objOwner string, objName string, extraInfo map[string]interface{}) (bool, error) {
+	if urlPath == "/api/mcp" {
+		if detailPath, ok := extraInfo["detailPathUrl"].(string); ok {
+			if detailPath == "initialize" || detailPath == "notifications/initialized" || detailPath == "ping" || detailPath == "tools/list" {
+				return true, nil
+			}
+		}
+	}
+
 	if conf.IsDemoMode() {
 		if !isAllowedInDemoMode(subOwner, subName, method, urlPath, objOwner, objName) {
-			return false
+			return false, nil
+		}
+	}
+
+	if subOwner == "app" {
+		// An application credential is an admin of its own organization only, and a
+		// global admin only when the application belongs to the built-in organization.
+		appUser, err := object.GetAppUser(util.GetId(subOwner, subName))
+		if err != nil {
+			return false, err
+		}
+		if appUser == nil {
+			return false, nil
+		}
+
+		if conf.BuiltinIsolationEnabled() && appUser.Owner == "built-in" {
+			return appUser.IsOrganizationAdmin() && object.RestrictedBuiltinServiceAPI(method, urlPath, objOwner), nil
+		}
+		if appUser.IsGlobalAdmin() || appUser.Owner == objOwner {
+			return true, nil
 		}
 	}
 
 	user, err := object.GetUser(util.GetId(subOwner, subName))
 	if err != nil {
-		panic(err)
-	}
-
-	if subOwner == "app" {
-		return true
+		return false, err
 	}
 
 	if user != nil {
 		if user.IsDeleted {
-			return false
+			return false, nil
 		}
 
-		if user.IsAdmin && (subOwner == objOwner || (objOwner == "admin")) {
-			return true
+		if user.IsGlobalAdmin() {
+			return true, nil
+		}
+
+		if conf.BuiltinIsolationEnabled() && user.Owner == "built-in" {
+			return !user.IsForbidden && builtinUserAPIAllowed(user.Name, method, urlPath, objOwner, objName), nil
+		}
+		if user.IsOrganizationAdmin() && subOwner == objOwner {
+			return true, nil
 		}
 	}
+
+	objOwner, objName = dropAnonymousSelfObject(subOwner, subName, objOwner, objName)
+	objName = dropNonUserSelfObject(subOwner, subName, urlPath, objOwner, objName)
 
 	res, err := Enforcer.Enforce(subOwner, subName, method, urlPath, objOwner, objName)
 	if err != nil {
-		panic(err)
+		return false, err
 	}
 
-	return res
+	if !res {
+		res, err = object.CheckApiPermission(util.GetId(subOwner, subName), objOwner, urlPath, method)
+		if err != nil {
+			return false, err
+		}
+	}
+
+	return res, nil
+}
+
+func dropAnonymousSelfObject(subOwner string, subName string, objOwner string, objName string) (string, string) {
+	if subOwner == "anonymous" && subName == "anonymous" && objOwner == "anonymous" && objName == "anonymous" {
+		return "", ""
+	}
+	return objOwner, objName
+}
+
+// userObjectApis lists the APIs whose object is a user (or a row keyed by the user), the
+// only ones the self-match of the API model may authorize. Any other API only reads the
+// owner and name of the request to authorize it, so a client could put its own ones there
+// and have the request run on another object, e.g. an MCP tool call or a sent email.
+var userObjectApis = []string{
+	"/api/get-user",
+	"/api/update-user",
+	"/api/delete-user",
+	"/api/check-user-password",
+	"/api/remove-user-from-group",
+	"/api/verify-identification",
+	"/api/mfa/setup/initiate",
+	"/api/mfa/setup/verify",
+	"/api/mfa/setup/enable",
+	"/api/delete-mfa",
+	"/api/set-preferred-mfa",
+	"/api/get-session",
+	"/api/is-session-duplicated",
+	"/api/add-session",
+	"/api/update-session",
+	"/api/delete-session",
+	"/api/get-permissions-by-submitter",
+	"/api/delete-resource",
+}
+
+func dropNonUserSelfObject(subOwner string, subName string, urlPath string, objOwner string, objName string) string {
+	if subOwner == objOwner && subName == objName && !util.InSlice(userObjectApis, urlPath) {
+		return ""
+	}
+	return objName
 }
 
 func isAllowedInDemoMode(subOwner string, subName string, method string, urlPath string, objOwner string, objName string) bool {
 	if method == "POST" {
-		if strings.HasPrefix(urlPath, "/api/login") || urlPath == "/api/logout" || urlPath == "/api/signup" || urlPath == "/api/callback" || urlPath == "/api/send-verification-code" || urlPath == "/api/send-email" || urlPath == "/api/verify-captcha" || urlPath == "/api/verify-code" || urlPath == "/api/check-user-password" || strings.HasPrefix(urlPath, "/api/mfa/") || urlPath == "/api/webhook" || urlPath == "/api/get-qrcode" {
+		if strings.HasPrefix(urlPath, "/api/login") || urlPath == "/api/logout" || urlPath == "/api/sso-logout" || urlPath == "/api/signup" || urlPath == "/api/callback" || urlPath == "/api/send-verification-code" || urlPath == "/api/send-email" || urlPath == "/api/verify-captcha" || urlPath == "/api/verify-code" || urlPath == "/api/check-user-password" || strings.HasPrefix(urlPath, "/api/mfa/") || urlPath == "/api/webhook" || urlPath == "/api/get-qrcode" || urlPath == "/api/refresh-engines" {
 			return true
 		} else if urlPath == "/api/update-user" {
 			// Allow ordinary users to update their own information
@@ -162,7 +288,7 @@ func isAllowedInDemoMode(subOwner string, subName string, method string, urlPath
 				return true
 			}
 			return false
-		} else if urlPath == "/api/upload-resource" {
+		} else if urlPath == "/api/upload-resource" || urlPath == "/api/add-transaction" {
 			if subOwner == "app" && subName == "app-casibase" {
 				return true
 			}

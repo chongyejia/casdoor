@@ -20,14 +20,18 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
 	"github.com/casdoor/casdoor/proxy"
 )
 
+const customHttpNotificationTimeout = 30 * time.Second
+
 type HttpNotificationClient struct {
-	endpoint  string
-	method    string
-	paramName string
+	endpoint   string
+	method     string
+	paramName  string
+	httpClient *http.Client
 }
 
 func NewCustomHttpProvider(endpoint string, method string, paramName string) (*HttpNotificationClient, error) {
@@ -39,30 +43,54 @@ func NewCustomHttpProvider(endpoint string, method string, paramName string) (*H
 	return client, nil
 }
 
+// SetHttpClient replaces the default client, nil keeps it
+func (c *HttpNotificationClient) SetHttpClient(httpClient *http.Client) {
+	c.httpClient = httpClient
+}
+
 func (c *HttpNotificationClient) Send(ctx context.Context, subject string, content string) error {
+	return c.SendWithRecipient(ctx, subject, content, "")
+}
+
+func (c *HttpNotificationClient) SendWithRecipient(ctx context.Context, subject string, content string, recipient string) error {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+
 	var req *http.Request
 	var err error
 	if c.method == "POST" {
 		formValues := url.Values{}
 		formValues.Set(c.paramName, content)
-		req, err = http.NewRequest(c.method, c.endpoint, strings.NewReader(formValues.Encode()))
+		if recipient != "" {
+			formValues.Set("recipient", recipient)
+		}
+		req, err = http.NewRequestWithContext(ctx, c.method, c.endpoint, strings.NewReader(formValues.Encode()))
 		if err != nil {
 			return err
 		}
 
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	} else if c.method == "GET" {
-		req, err = http.NewRequest(c.method, c.endpoint, nil)
+		req, err = http.NewRequestWithContext(ctx, c.method, c.endpoint, nil)
 		if err != nil {
 			return err
 		}
 
 		q := req.URL.Query()
 		q.Add(c.paramName, content)
+		if recipient != "" {
+			q.Add("recipient", recipient)
+		}
 		req.URL.RawQuery = q.Encode()
+	} else {
+		return fmt.Errorf("HttpNotificationClient's SendMessage() error, unsupported method: %s", c.method)
 	}
 
-	httpClient := proxy.DefaultHttpClient
+	httpClient := getCustomHttpNotificationClient()
+	if c.httpClient != nil {
+		httpClient = c.httpClient
+	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err
@@ -74,4 +102,17 @@ func (c *HttpNotificationClient) Send(ctx context.Context, subject string, conte
 	}
 
 	return err
+}
+
+func getCustomHttpNotificationClient() *http.Client {
+	httpClient := proxy.DefaultHttpClient
+	if httpClient == nil {
+		httpClient = http.DefaultClient
+	}
+
+	client := *httpClient
+	if client.Timeout == 0 {
+		client.Timeout = customHttpNotificationTimeout
+	}
+	return &client
 }

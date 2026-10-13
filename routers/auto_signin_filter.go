@@ -15,14 +15,35 @@
 package routers
 
 import (
+	"encoding/json"
 	"fmt"
+	"strings"
 
-	"github.com/beego/beego/context"
+	"github.com/beego/beego/v2/server/web/context"
+	"github.com/casdoor/casdoor/i18n"
+	"github.com/casdoor/casdoor/mcpself"
 	"github.com/casdoor/casdoor/object"
 	"github.com/casdoor/casdoor/util"
 )
 
 func AutoSigninFilter(ctx *context.Context) {
+	urlPath := ctx.Request.URL.Path
+	if strings.HasPrefix(urlPath, "/api/login/oauth/access_token") {
+		return
+	}
+	// The RFC 7591/7592 DCR endpoints authenticate themselves: the bearer value is the
+	// application's "registration_access_token", which is not a row in the "token" table.
+	if strings.HasPrefix(urlPath, "/api/oauth/register") {
+		return
+	}
+	if urlPath == "/api/mcp" {
+		var req mcpself.McpRequest
+		if err := json.Unmarshal(ctx.Input.RequestBody, &req); err == nil {
+			if req.Method == "initialize" || req.Method == "notifications/initialized" || req.Method == "ping" || req.Method == "tools/list" {
+				return
+			}
+		}
+	}
 	//if getSessionUser(ctx) != "" {
 	//	return
 	//}
@@ -55,13 +76,52 @@ func AutoSigninFilter(ctx *context.Context) {
 			return
 		}
 
-		userId := util.GetId(token.Organization, token.User)
+		// The token's user may have been forbidden or deleted after the token was issued
+		isUserActive, err := token.IsUserActive()
+		if err != nil {
+			responseError(ctx, err.Error())
+			return
+		}
+		if !isUserActive {
+			responseError(ctx, "The user is forbidden to sign in, please contact the administrator")
+			return
+		}
+
+		// Validate DPoP proof for DPoP-bound tokens (RFC 9449).
+		if token.TokenType == "DPoP" {
+			dpopProof := ctx.Request.Header.Get("DPoP")
+			if dpopProof == "" {
+				responseError(ctx, "DPoP proof header required for DPoP-bound access token")
+				return
+			}
+			htu := object.GetDPoPHtu(ctx.Request.Host, ctx.Request.URL.Path)
+			jkt, dpopErr := object.ValidateDPoPProof(dpopProof, ctx.Request.Method, htu, accessToken)
+			if dpopErr != nil {
+				responseError(ctx, fmt.Sprintf("DPoP proof validation failed: %s", dpopErr.Error()))
+				return
+			}
+			if jkt != token.DPoPJkt {
+				responseError(ctx, "DPoP proof key binding mismatch")
+				return
+			}
+		}
+
 		application, err := object.GetApplicationByUserId(fmt.Sprintf("app/%s", token.Application))
 		if err != nil {
 			responseError(ctx, err.Error())
 			return
 		}
+		if application == nil {
+			responseError(ctx, fmt.Sprintf("No application is found for userId: app/%s", token.Application))
+			return
+		}
 
+		var userId string
+		if token.GrantType == "client_credentials" {
+			userId = object.GetAppUserId(application)
+		} else {
+			userId = util.GetId(token.Organization, token.User)
+		}
 		setSessionUser(ctx, userId)
 		setSessionOidc(ctx, token.Scope, application.ClientId)
 		return
@@ -78,12 +138,22 @@ func AutoSigninFilter(ctx *context.Context) {
 		return
 	}
 
+	// "/page?accessKey=123&accessSecret=456"
+	userId, err = getUsernameByAccessKey(ctx)
+	if err != nil {
+		responseError(ctx, err.Error())
+		return
+	}
+	if userId != "" {
+		setSessionUser(ctx, userId)
+		return
+	}
+
 	// "/page?username=built-in/admin&password=123"
 	userId = ctx.Input.Query("username")
 	password := ctx.Input.Query("password")
 	if userId != "" && password != "" && ctx.Input.Query("grant_type") == "" {
-		owner, name := util.GetOwnerAndNameFromId(userId)
-		_, err = object.CheckUserPassword(owner, name, password, "en")
+		err = checkUserPasswordWithoutMfa(userId, password, util.GetClientIpFromRequest(ctx.Request), getAcceptLanguage(ctx))
 		if err != nil {
 			responseError(ctx, err.Error())
 			return
@@ -91,4 +161,41 @@ func AutoSigninFilter(ctx *context.Context) {
 
 		setSessionUser(ctx, userId)
 	}
+}
+
+func checkUserPasswordWithoutMfa(userId string, password string, clientIp string, lang string) error {
+	owner, name, err := util.GetOwnerAndNameFromIdWithError(userId)
+	if err != nil {
+		return err
+	}
+
+	user, err := object.CheckUserPassword(owner, name, password, lang)
+	if err != nil {
+		return err
+	}
+
+	if user.IsMfaEnabled() {
+		return fmt.Errorf("the user: %s has MFA enabled and cannot sign in with a password in the URL", userId)
+	}
+	return checkUrlSigninPolicy(user, clientIp, lang)
+}
+
+func checkUrlSigninPolicy(user *object.User, clientIp string, lang string) error {
+	organization, err := object.GetOrganizationByUser(user)
+	if err != nil {
+		return err
+	}
+	if organization != nil && organization.DisableSignin {
+		return fmt.Errorf(i18n.Translate(lang, "auth:The organization: %s has disabled users to signin"), organization.Name)
+	}
+
+	err = object.CheckEntryIp(clientIp, user, nil, organization, lang)
+	if err != nil {
+		return err
+	}
+
+	if user.NeedUpdatePassword || object.IsNeedPromptMfa(organization, user) {
+		return fmt.Errorf("the user: %s must update the password or set up MFA on the login page first", user.GetId())
+	}
+	return nil
 }

@@ -17,7 +17,7 @@ package controllers
 import (
 	"encoding/json"
 
-	"github.com/beego/beego/utils/pagination"
+	"github.com/beego/beego/v2/core/utils/pagination"
 	"github.com/casdoor/casdoor/object"
 	"github.com/casdoor/casdoor/util"
 )
@@ -30,16 +30,33 @@ import (
 // @Success 200 {array} object.Transaction The Response object
 // @router /get-transactions [get]
 func (c *ApiController) GetTransactions() {
-	owner := c.Input().Get("owner")
-	limit := c.Input().Get("pageSize")
-	page := c.Input().Get("p")
-	field := c.Input().Get("field")
-	value := c.Input().Get("value")
-	sortField := c.Input().Get("sortField")
-	sortOrder := c.Input().Get("sortOrder")
+	owner := c.Ctx.Input.Query("owner")
+	limit := c.Ctx.Input.Query("pageSize")
+	page := c.Ctx.Input.Query("p")
+	field := c.Ctx.Input.Query("field")
+	value := c.Ctx.Input.Query("value")
+	sortField := c.Ctx.Input.Query("sortField")
+	sortOrder := c.Ctx.Input.Query("sortOrder")
 
 	if limit == "" || page == "" {
-		transactions, err := object.GetTransactions(owner)
+		var transactions []*object.Transaction
+		var err error
+
+		if c.IsAdminOfOrganization(owner) {
+			// If field is "user", filter by that user even for admins
+			if field == "user" && value != "" {
+				transactions, err = object.GetUserTransactions(owner, value)
+			} else {
+				transactions, err = object.GetTransactions(owner)
+			}
+		} else {
+			userName, ok := c.requireSessionUserNameOf(owner)
+			if !ok {
+				return
+			}
+			transactions, err = object.GetUserTransactions(owner, userName)
+		}
+
 		if err != nil {
 			c.ResponseError(err.Error())
 			return
@@ -48,14 +65,25 @@ func (c *ApiController) GetTransactions() {
 		c.ResponseOk(transactions)
 	} else {
 		limit := util.ParseInt(limit)
-		count, err := object.GetTransactionCount(owner, field, value)
+		user := ""
+
+		// Apply user filter for non-admin users
+		if !c.IsAdminOfOrganization(owner) {
+			userName, ok := c.requireSessionUserNameOf(owner)
+			if !ok {
+				return
+			}
+			user = userName
+		}
+
+		count, err := object.GetTransactionCount(owner, user, field, value)
 		if err != nil {
 			c.ResponseError(err.Error())
 			return
 		}
 
-		paginator := pagination.SetPaginator(c.Ctx, limit, count)
-		transactions, err := object.GetPaginationTransactions(owner, paginator.Offset(), limit, field, value, sortField, sortOrder)
+		paginator := pagination.NewPaginator(c.Ctx.Request, limit, count)
+		transactions, err := object.GetPaginationTransactions(owner, user, paginator.Offset(), limit, field, value, sortField, sortOrder)
 		if err != nil {
 			c.ResponseError(err.Error())
 			return
@@ -63,28 +91,6 @@ func (c *ApiController) GetTransactions() {
 
 		c.ResponseOk(transactions, paginator.Nums())
 	}
-}
-
-// GetUserTransactions
-// @Title GetUserTransaction
-// @Tag Transaction API
-// @Description get transactions for a user
-// @Param   owner     query    string  true        "The owner of transactions"
-// @Param   organization    query   string  true   "The organization of the user"
-// @Param   user    query   string  true           "The username of the user"
-// @Success 200 {array} object.Transaction The Response object
-// @router /get-user-transactions [get]
-func (c *ApiController) GetUserTransactions() {
-	owner := c.Input().Get("owner")
-	user := c.Input().Get("user")
-
-	transactions, err := object.GetUserTransactions(owner, user)
-	if err != nil {
-		c.ResponseError(err.Error())
-		return
-	}
-
-	c.ResponseOk(transactions)
 }
 
 // GetTransaction
@@ -95,12 +101,31 @@ func (c *ApiController) GetUserTransactions() {
 // @Success 200 {object} object.Transaction The Response object
 // @router /get-transaction [get]
 func (c *ApiController) GetTransaction() {
-	id := c.Input().Get("id")
+	id := c.Ctx.Input.Query("id")
 
 	transaction, err := object.GetTransaction(id)
 	if err != nil {
 		c.ResponseError(err.Error())
 		return
+	}
+
+	if transaction == nil {
+		c.ResponseOk(nil)
+		return
+	}
+
+	// Check if non-admin user is trying to access someone else's transaction
+	if !c.IsAdminOfOrganization(transaction.Owner) {
+		userName, ok := c.requireSessionUserNameOf(transaction.Owner)
+		if !ok {
+			return
+		}
+
+		// Only allow users to view their own transactions
+		if transaction.User != userName {
+			c.ResponseError(c.T("auth:Unauthorized operation"))
+			return
+		}
 	}
 
 	c.ResponseOk(transaction)
@@ -115,7 +140,7 @@ func (c *ApiController) GetTransaction() {
 // @Success 200 {object} controllers.Response The Response object
 // @router /update-transaction [post]
 func (c *ApiController) UpdateTransaction() {
-	id := c.Input().Get("id")
+	id := c.Ctx.Input.Query("id")
 
 	var transaction object.Transaction
 	err := json.Unmarshal(c.Ctx.Input.RequestBody, &transaction)
@@ -124,7 +149,7 @@ func (c *ApiController) UpdateTransaction() {
 		return
 	}
 
-	c.Data["json"] = wrapActionResponse(object.UpdateTransaction(id, &transaction))
+	c.Data["json"] = wrapActionResponse(object.UpdateTransaction(id, &transaction, c.GetAcceptLanguage()))
 	c.ServeJSON()
 }
 
@@ -133,6 +158,7 @@ func (c *ApiController) UpdateTransaction() {
 // @Tag Transaction API
 // @Description add transaction
 // @Param   body    body   object.Transaction  true        "The details of the transaction"
+// @Param   dryRun  query  string  false       "Dry run mode: set to 'true' or '1' to validate without committing"
 // @Success 200 {object} controllers.Response The Response object
 // @router /add-transaction [post]
 func (c *ApiController) AddTransaction() {
@@ -143,8 +169,22 @@ func (c *ApiController) AddTransaction() {
 		return
 	}
 
-	c.Data["json"] = wrapActionResponse(object.AddTransaction(&transaction))
-	c.ServeJSON()
+	dryRunParam := c.Ctx.Input.Query("dryRun")
+	dryRun := dryRunParam != ""
+
+	affected, transactionId, err := object.AddTransaction(&transaction, c.GetAcceptLanguage(), dryRun)
+	if err != nil {
+		c.ResponseError(err.Error())
+		return
+	}
+
+	if !affected {
+		c.Data["json"] = wrapActionResponse(false)
+		c.ServeJSON()
+		return
+	}
+
+	c.ResponseOk(transactionId)
 }
 
 // DeleteTransaction
@@ -162,6 +202,6 @@ func (c *ApiController) DeleteTransaction() {
 		return
 	}
 
-	c.Data["json"] = wrapActionResponse(object.DeleteTransaction(&transaction))
+	c.Data["json"] = wrapActionResponse(object.DeleteTransaction(&transaction, c.GetAcceptLanguage()))
 	c.ServeJSON()
 }

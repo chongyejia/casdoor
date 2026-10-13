@@ -17,7 +17,7 @@ package controllers
 import (
 	"encoding/json"
 
-	"github.com/beego/beego/utils/pagination"
+	"github.com/beego/beego/v2/core/utils/pagination"
 	"github.com/casdoor/casdoor/object"
 	"github.com/casdoor/casdoor/util"
 )
@@ -30,16 +30,33 @@ import (
 // @Success 200 {array} object.Payment The Response object
 // @router /get-payments [get]
 func (c *ApiController) GetPayments() {
-	owner := c.Input().Get("owner")
-	limit := c.Input().Get("pageSize")
-	page := c.Input().Get("p")
-	field := c.Input().Get("field")
-	value := c.Input().Get("value")
-	sortField := c.Input().Get("sortField")
-	sortOrder := c.Input().Get("sortOrder")
+	owner := c.Ctx.Input.Query("owner")
+	limit := c.Ctx.Input.Query("pageSize")
+	page := c.Ctx.Input.Query("p")
+	field := c.Ctx.Input.Query("field")
+	value := c.Ctx.Input.Query("value")
+	sortField := c.Ctx.Input.Query("sortField")
+	sortOrder := c.Ctx.Input.Query("sortOrder")
 
 	if limit == "" || page == "" {
-		payments, err := object.GetPayments(owner)
+		var payments []*object.Payment
+		var err error
+
+		if c.IsAdminOfOrganization(owner) {
+			// If field is "user", filter by that user even for admins
+			if field == "user" && value != "" {
+				payments, err = object.GetUserPayments(owner, value)
+			} else {
+				payments, err = object.GetPayments(owner)
+			}
+		} else {
+			userName, ok := c.requireSessionUserNameOf(owner)
+			if !ok {
+				return
+			}
+			payments, err = object.GetUserPayments(owner, userName)
+		}
+
 		if err != nil {
 			c.ResponseError(err.Error())
 			return
@@ -48,14 +65,22 @@ func (c *ApiController) GetPayments() {
 		c.ResponseOk(payments)
 	} else {
 		limit := util.ParseInt(limit)
-		count, err := object.GetPaymentCount(owner, field, value)
+		user := ""
+		if !c.IsAdminOfOrganization(owner) {
+			userName, ok := c.requireSessionUserNameOf(owner)
+			if !ok {
+				return
+			}
+			user = userName
+		}
+		count, err := object.GetPaymentCount(owner, user, field, value)
 		if err != nil {
 			c.ResponseError(err.Error())
 			return
 		}
 
-		paginator := pagination.SetPaginator(c.Ctx, limit, count)
-		payments, err := object.GetPaginationPayments(owner, paginator.Offset(), limit, field, value, sortField, sortOrder)
+		paginator := pagination.NewPaginator(c.Ctx.Request, limit, count)
+		payments, err := object.GetPaginationPayments(owner, user, paginator.Offset(), limit, field, value, sortField, sortOrder)
 		if err != nil {
 			c.ResponseError(err.Error())
 			return
@@ -75,8 +100,21 @@ func (c *ApiController) GetPayments() {
 // @Success 200 {array} object.Payment The Response object
 // @router /get-user-payments [get]
 func (c *ApiController) GetUserPayments() {
-	owner := c.Input().Get("owner")
-	user := c.Input().Get("user")
+	owner := c.Ctx.Input.Query("owner")
+	user := c.Ctx.Input.Query("user")
+
+	if !c.IsAdminOfOrganization(owner) {
+		sessionUser := c.GetSessionUsername()
+		sessionUserOwner, sessionUserName, err := util.GetOwnerAndNameFromIdWithError(sessionUser)
+		if err != nil {
+			c.ResponseError(err.Error())
+			return
+		}
+		if sessionUserOwner != owner || sessionUserName != user {
+			c.ResponseError("Forbidden")
+			return
+		}
+	}
 
 	payments, err := object.GetUserPayments(owner, user)
 	if err != nil {
@@ -95,12 +133,25 @@ func (c *ApiController) GetUserPayments() {
 // @Success 200 {object} object.Payment The Response object
 // @router /get-payment [get]
 func (c *ApiController) GetPayment() {
-	id := c.Input().Get("id")
+	id := c.Ctx.Input.Query("id")
 
 	payment, err := object.GetPayment(id)
 	if err != nil {
 		c.ResponseError(err.Error())
 		return
+	}
+
+	if payment != nil && !c.IsAdminOfOrganization(payment.Owner) {
+		sessionUser := c.GetSessionUsername()
+		sessionUserOwner, sessionUserName, err := util.GetOwnerAndNameFromIdWithError(sessionUser)
+		if err != nil {
+			c.ResponseError(err.Error())
+			return
+		}
+		if payment.Owner != sessionUserOwner || payment.User != sessionUserName {
+			c.ResponseError("Forbidden")
+			return
+		}
 	}
 
 	c.ResponseOk(payment)
@@ -115,7 +166,7 @@ func (c *ApiController) GetPayment() {
 // @Success 200 {object} controllers.Response The Response object
 // @router /update-payment [post]
 func (c *ApiController) UpdatePayment() {
-	id := c.Input().Get("id")
+	id := c.Ctx.Input.Query("id")
 
 	var payment object.Payment
 	err := json.Unmarshal(c.Ctx.Input.RequestBody, &payment)
@@ -179,7 +230,7 @@ func (c *ApiController) NotifyPayment() {
 
 	body := c.Ctx.Input.RequestBody
 
-	payment, err := object.NotifyPayment(body, owner, paymentName)
+	payment, err := object.NotifyPayment(body, owner, paymentName, c.GetAcceptLanguage())
 	if err != nil {
 		c.ResponseError(err.Error())
 		return
@@ -196,7 +247,7 @@ func (c *ApiController) NotifyPayment() {
 // @Success 200 {object} controllers.Response The Response object
 // @router /invoice-payment [post]
 func (c *ApiController) InvoicePayment() {
-	id := c.Input().Get("id")
+	id := c.Ctx.Input.Query("id")
 
 	payment, err := object.GetPayment(id)
 	if err != nil {
@@ -204,9 +255,24 @@ func (c *ApiController) InvoicePayment() {
 		return
 	}
 
+	// the same check as GetPayment()
+	if payment != nil && !c.IsAdminOfOrganization(payment.Owner) {
+		sessionUser := c.GetSessionUsername()
+		sessionUserOwner, sessionUserName, err := util.GetOwnerAndNameFromIdWithError(sessionUser)
+		if err != nil {
+			c.ResponseError(err.Error())
+			return
+		}
+		if payment.Owner != sessionUserOwner || payment.User != sessionUserName {
+			c.ResponseError("Forbidden")
+			return
+		}
+	}
+
 	invoiceUrl, err := object.InvoicePayment(payment)
 	if err != nil {
 		c.ResponseError(err.Error())
+		return
 	}
 	c.ResponseOk(invoiceUrl)
 }

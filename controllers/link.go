@@ -16,18 +16,22 @@ package controllers
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/casdoor/casdoor/object"
 )
 
 type LinkForm struct {
 	ProviderType string      `json:"providerType"`
+	ProviderName string      `json:"providerName"`
 	User         object.User `json:"user"`
 }
 
 // Unlink ...
 // @Tag Login API
 // @Title Unlink
+// @Description Unlink a third-party provider from user account
+// @Param   body body controllers.LinkForm true "Unlink request"
 // @router /unlink [post]
 // @Success 200 {object} object.Userinfo The Response object
 func (c *ApiController) Unlink() {
@@ -43,24 +47,28 @@ func (c *ApiController) Unlink() {
 		return
 	}
 	providerType := form.ProviderType
+	providerName := form.ProviderName
 
 	// the user will be unlinked from the provider
-	unlinkedUser := form.User
+	unlinkedUser, ok := c.getUnlinkedUser(&form.User)
+	if !ok {
+		return
+	}
 
-	if user.Id != unlinkedUser.Id && !user.IsGlobalAdmin() {
+	isSelf := user.GetId() == unlinkedUser.GetId()
+	if !isSelf && !user.IsGlobalAdmin() {
 		// if the user is not the same as the one we are unlinking, we need to make sure the user is the global admin.
 		c.ResponseError(c.T("link:You are not the global admin, you can't unlink other users"))
 		return
 	}
 
-	if user.Id == unlinkedUser.Id && !user.IsGlobalAdmin() {
+	if isSelf && !user.IsGlobalAdmin() {
 		// if the user is unlinking themselves, should check the provider can be unlinked, if not, we should return an error.
 		application, err := object.GetApplicationByUser(user)
 		if err != nil {
 			c.ResponseError(err.Error())
 			return
 		}
-
 		if application == nil {
 			c.ResponseError(c.T("link:You can't unlink yourself, you are not a member of any application"))
 			return
@@ -71,11 +79,26 @@ func (c *ApiController) Unlink() {
 			return
 		}
 
-		provider := application.GetProviderItemByType(providerType)
+		provider := application.GetProviderItem(providerName)
+		if provider == nil && !object.IsFlexibleCustomProvider(providerType) {
+			provider = application.GetProviderItemByType(providerType)
+		}
 		if provider == nil {
-			c.ResponseError(c.T("link:This application has no providers of type") + providerType)
+			if providerName != "" {
+				c.ResponseError(c.T("link:This application has no providers") + ": " + providerName)
+			} else {
+				c.ResponseError(c.T("link:This application has no providers of type") + providerType)
+			}
 			return
 		}
+
+		if provider.Provider == nil {
+			c.ResponseError(c.T("link:This application has no providers"))
+			return
+		}
+
+		providerType = provider.Provider.Type
+		providerName = provider.Name
 
 		if !provider.CanUnlink {
 			c.ResponseError(c.T("link:This provider can't be unlinked"))
@@ -88,24 +111,65 @@ func (c *ApiController) Unlink() {
 	// 1. the user is the global admin
 	// 2. the user is unlinking themselves and provider can be unlinked
 
-	value := object.GetUserField(&unlinkedUser, providerType)
+	if object.IsFlexibleCustomProvider(providerType) {
+		if providerName == "" {
+			c.ResponseError(c.T("link:Provider name is required for Custom Flexible providers"))
+			return
+		}
+
+		link, err := object.GetThirdPartyLink(unlinkedUser.Owner, unlinkedUser.Name, providerName)
+		if err != nil {
+			c.ResponseError(err.Error())
+			return
+		}
+		if link == nil {
+			c.ResponseError(c.T("link:Please link first"))
+			return
+		}
+
+		_, err = object.DeleteThirdPartyLink(unlinkedUser.Owner, unlinkedUser.Name, providerName)
+		if err != nil {
+			c.ResponseError(err.Error())
+			return
+		}
+
+		c.ResponseOk()
+		return
+	}
+
+	value := object.GetUserField(unlinkedUser, providerType)
 
 	if value == "" {
 		c.ResponseError(c.T("link:Please link first"), value)
 		return
 	}
 
-	_, err = object.ClearUserOAuthProperties(&unlinkedUser, providerType)
+	_, err = object.ClearUserOAuthProperties(unlinkedUser, providerType)
 	if err != nil {
 		c.ResponseError(err.Error())
 		return
 	}
 
-	_, err = object.LinkUserAccount(&unlinkedUser, providerType, "")
+	_, err = object.LinkUserAccount(unlinkedUser, providerType, "")
 	if err != nil {
 		c.ResponseError(err.Error())
 		return
 	}
 
 	c.ResponseOk()
+}
+
+// getUnlinkedUser loads the user named by the request from the database: the other fields of
+// the posted user are written back when its OAuth properties are cleared, so they can't be trusted
+func (c *ApiController) getUnlinkedUser(formUser *object.User) (*object.User, bool) {
+	unlinkedUser, err := object.GetUser(formUser.GetId())
+	if err != nil {
+		c.ResponseError(err.Error())
+		return nil, false
+	}
+	if unlinkedUser == nil {
+		c.ResponseError(fmt.Sprintf(c.T("general:The user: %s doesn't exist"), formUser.GetId()))
+		return nil, false
+	}
+	return unlinkedUser, true
 }

@@ -24,7 +24,11 @@ import (
 
 func (c *ApiController) UploadPermissions() {
 	userId := c.GetSessionUsername()
-	owner, user := util.GetOwnerAndNameFromId(userId)
+	owner, user, err := util.GetOwnerAndNameFromIdWithError(userId)
+	if err != nil {
+		c.ResponseError(err.Error())
+		return
+	}
 
 	file, header, err := c.Ctx.Request.FormFile("file")
 	if err != nil {
@@ -44,11 +48,12 @@ func (c *ApiController) UploadPermissions() {
 	affected, err := object.UploadPermissions(owner, path)
 	if err != nil {
 		c.ResponseError(err.Error())
+		return
 	}
 
 	if affected {
 		c.ResponseOk()
 	} else {
-		c.ResponseError(c.T("user_upload:Failed to import users"))
+		c.ResponseError(c.T("general:Failed to import users"))
 	}
 }

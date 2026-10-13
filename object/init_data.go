@@ -17,42 +17,51 @@ package object
 import (
 	"github.com/casdoor/casdoor/conf"
 	"github.com/casdoor/casdoor/util"
-	"github.com/casvisor/casvisor-go-sdk/casvisorsdk"
 )
 
 type InitData struct {
-	Organizations []*Organization       `json:"organizations"`
-	Applications  []*Application        `json:"applications"`
-	Users         []*User               `json:"users"`
-	Certs         []*Cert               `json:"certs"`
-	Providers     []*Provider           `json:"providers"`
-	Ldaps         []*Ldap               `json:"ldaps"`
-	Models        []*Model              `json:"models"`
-	Permissions   []*Permission         `json:"permissions"`
-	Payments      []*Payment            `json:"payments"`
-	Products      []*Product            `json:"products"`
-	Resources     []*Resource           `json:"resources"`
-	Roles         []*Role               `json:"roles"`
-	Syncers       []*Syncer             `json:"syncers"`
-	Tokens        []*Token              `json:"tokens"`
-	Webhooks      []*Webhook            `json:"webhooks"`
-	Groups        []*Group              `json:"groups"`
-	Adapters      []*Adapter            `json:"adapters"`
-	Enforcers     []*Enforcer           `json:"enforcers"`
-	Plans         []*Plan               `json:"plans"`
-	Pricings      []*Pricing            `json:"pricings"`
-	Invitations   []*Invitation         `json:"invitations"`
-	Records       []*casvisorsdk.Record `json:"records"`
-	Sessions      []*Session            `json:"sessions"`
-	Subscriptions []*Subscription       `json:"subscriptions"`
-	Transactions  []*Transaction        `json:"transactions"`
+	Organizations []*Organization `json:"organizations"`
+	Applications  []*Application  `json:"applications"`
+	Users         []*User         `json:"users"`
+	Certs         []*Cert         `json:"certs"`
+	Providers     []*Provider     `json:"providers"`
+	Ldaps         []*Ldap         `json:"ldaps"`
+	Models        []*Model        `json:"models"`
+	Permissions   []*Permission   `json:"permissions"`
+	Payments      []*Payment      `json:"payments"`
+	Products      []*Product      `json:"products"`
+	Resources     []*Resource     `json:"resources"`
+	Roles         []*Role         `json:"roles"`
+	Syncers       []*Syncer       `json:"syncers"`
+	Tokens        []*Token        `json:"tokens"`
+	Webhooks      []*Webhook      `json:"webhooks"`
+	Groups        []*Group        `json:"groups"`
+	Adapters      []*Adapter      `json:"adapters"`
+	Enforcers     []*Enforcer     `json:"enforcers"`
+	Plans         []*Plan         `json:"plans"`
+	Pricings      []*Pricing      `json:"pricings"`
+	Invitations   []*Invitation   `json:"invitations"`
+	Records       []*Record       `json:"records"`
+	Sessions      []*Session      `json:"sessions"`
+	Subscriptions []*Subscription `json:"subscriptions"`
+	Transactions  []*Transaction  `json:"transactions"`
+	Sites         []*Site         `json:"sites"`
+	Rules         []*Rule         `json:"rules"`
+
+	ThirdPartyLinks []*ThirdPartyLink `json:"third_party_links"`
+
+	EnforcerPolicies map[string][][]string `json:"enforcerPolicies"`
 }
+
+var initDataNewOnly bool
 
 func InitFromFile() {
 	initDataFile := conf.GetConfigString("initDataFile")
 	if initDataFile == "" {
 		return
 	}
+
+	initDataNewOnly = conf.GetConfigBool("initDataNewOnly")
 
 	initData, err := readInitDataFromFile(initDataFile)
 	if err != nil {
@@ -66,11 +75,11 @@ func InitFromFile() {
 		for _, provider := range initData.Providers {
 			initDefinedProvider(provider)
 		}
-		for _, user := range initData.Users {
-			initDefinedUser(user)
-		}
 		for _, application := range initData.Applications {
 			initDefinedApplication(application)
+		}
+		for _, user := range initData.Users {
+			initDefinedUser(user)
 		}
 		for _, cert := range initData.Certs {
 			initDefinedCert(cert)
@@ -80,9 +89,6 @@ func InitFromFile() {
 		}
 		for _, model := range initData.Models {
 			initDefinedModel(model)
-		}
-		for _, permission := range initData.Permissions {
-			initDefinedPermission(permission)
 		}
 		for _, payment := range initData.Payments {
 			initDefinedPayment(payment)
@@ -112,7 +118,11 @@ func InitFromFile() {
 			initDefinedAdapter(adapter)
 		}
 		for _, enforcer := range initData.Enforcers {
-			initDefinedEnforcer(enforcer)
+			policies := initData.EnforcerPolicies[enforcer.GetId()]
+			initDefinedEnforcer(enforcer, policies)
+		}
+		for _, permission := range initData.Permissions {
+			initDefinedPermission(permission)
 		}
 		for _, plan := range initData.Plans {
 			initDefinedPlan(plan)
@@ -134,6 +144,15 @@ func InitFromFile() {
 		}
 		for _, transaction := range initData.Transactions {
 			initDefinedTransaction(transaction)
+		}
+		for _, rule := range initData.Rules {
+			initDefinedRule(rule)
+		}
+		for _, site := range initData.Sites {
+			initDefinedSite(site)
+		}
+		for _, link := range initData.ThirdPartyLinks {
+			initThirdPartyLinks(link)
 		}
 	}
 }
@@ -167,10 +186,16 @@ func readInitDataFromFile(filePath string) (*InitData, error) {
 		Plans:         []*Plan{},
 		Pricings:      []*Pricing{},
 		Invitations:   []*Invitation{},
-		Records:       []*casvisorsdk.Record{},
+		Records:       []*Record{},
 		Sessions:      []*Session{},
 		Subscriptions: []*Subscription{},
 		Transactions:  []*Transaction{},
+		Sites:         []*Site{},
+		Rules:         []*Rule{},
+
+		ThirdPartyLinks: []*ThirdPartyLink{},
+
+		EnforcerPolicies: map[string][][]string{},
 	}
 	err := util.JsonToStruct(s, data)
 	if err != nil {
@@ -181,6 +206,9 @@ func readInitDataFromFile(filePath string) (*InitData, error) {
 	for _, organization := range data.Organizations {
 		if organization.Tags == nil {
 			organization.Tags = []string{}
+		}
+		if organization.AccountItems == nil {
+			organization.AccountItems = []*AccountItem{}
 		}
 	}
 	for _, application := range data.Applications {
@@ -266,6 +294,9 @@ func initDefinedOrganization(organization *Organization) {
 	}
 
 	if existed != nil {
+		if initDataNewOnly {
+			return
+		}
 		affected, err := deleteOrganization(organization)
 		if err != nil {
 			panic(err)
@@ -275,7 +306,9 @@ func initDefinedOrganization(organization *Organization) {
 		}
 	}
 	organization.CreatedTime = util.GetCurrentTime()
-	organization.AccountItems = getBuiltInAccountItems()
+	if len(organization.AccountItems) == 0 {
+		organization.AccountItems = GetDefaultAccountItems()
+	}
 
 	_, err = AddOrganization(organization)
 	if err != nil {
@@ -290,6 +323,9 @@ func initDefinedApplication(application *Application) {
 	}
 
 	if existed != nil {
+		if initDataNewOnly {
+			return
+		}
 		affected, err := deleteApplication(application)
 		if err != nil {
 			panic(err)
@@ -299,7 +335,7 @@ func initDefinedApplication(application *Application) {
 		}
 	}
 	application.CreatedTime = util.GetCurrentTime()
-	_, err = AddApplication(application)
+	_, err = AddApplication(application, "en")
 	if err != nil {
 		panic(err)
 	}
@@ -311,6 +347,9 @@ func initDefinedUser(user *User) {
 		panic(err)
 	}
 	if existed != nil {
+		if initDataNewOnly {
+			return
+		}
 		affected, err := deleteUser(user)
 		if err != nil {
 			panic(err)
@@ -324,7 +363,7 @@ func initDefinedUser(user *User) {
 	if user.Properties == nil {
 		user.Properties = make(map[string]string)
 	}
-	_, err = AddUser(user)
+	_, err = AddUser(user, "en")
 	if err != nil {
 		panic(err)
 	}
@@ -337,6 +376,9 @@ func initDefinedCert(cert *Cert) {
 	}
 
 	if existed != nil {
+		if initDataNewOnly {
+			return
+		}
 		affected, err := DeleteCert(cert)
 		if err != nil {
 			panic(err)
@@ -359,6 +401,9 @@ func initDefinedLdap(ldap *Ldap) {
 	}
 
 	if existed != nil {
+		if initDataNewOnly {
+			return
+		}
 		affected, err := DeleteLdap(ldap)
 		if err != nil {
 			panic(err)
@@ -380,6 +425,9 @@ func initDefinedProvider(provider *Provider) {
 	}
 
 	if existed != nil {
+		if initDataNewOnly {
+			return
+		}
 		affected, err := DeleteProvider(provider)
 		if err != nil {
 			panic(err)
@@ -401,6 +449,9 @@ func initDefinedModel(model *Model) {
 	}
 
 	if existed != nil {
+		if initDataNewOnly {
+			return
+		}
 		affected, err := DeleteModel(model)
 		if err != nil {
 			panic(err)
@@ -423,6 +474,9 @@ func initDefinedPermission(permission *Permission) {
 	}
 
 	if existed != nil {
+		if initDataNewOnly {
+			return
+		}
 		affected, err := deletePermission(permission)
 		if err != nil {
 			panic(err)
@@ -445,6 +499,9 @@ func initDefinedPayment(payment *Payment) {
 	}
 
 	if existed != nil {
+		if initDataNewOnly {
+			return
+		}
 		affected, err := DeletePayment(payment)
 		if err != nil {
 			panic(err)
@@ -467,6 +524,9 @@ func initDefinedProduct(product *Product) {
 	}
 
 	if existed != nil {
+		if initDataNewOnly {
+			return
+		}
 		affected, err := DeleteProduct(product)
 		if err != nil {
 			panic(err)
@@ -489,6 +549,9 @@ func initDefinedResource(resource *Resource) {
 	}
 
 	if existed != nil {
+		if initDataNewOnly {
+			return
+		}
 		affected, err := DeleteResource(resource)
 		if err != nil {
 			panic(err)
@@ -511,6 +574,9 @@ func initDefinedRole(role *Role) {
 	}
 
 	if existed != nil {
+		if initDataNewOnly {
+			return
+		}
 		affected, err := deleteRole(role)
 		if err != nil {
 			panic(err)
@@ -533,6 +599,9 @@ func initDefinedSyncer(syncer *Syncer) {
 	}
 
 	if existed != nil {
+		if initDataNewOnly {
+			return
+		}
 		affected, err := DeleteSyncer(syncer)
 		if err != nil {
 			panic(err)
@@ -555,6 +624,9 @@ func initDefinedToken(token *Token) {
 	}
 
 	if existed != nil {
+		if initDataNewOnly {
+			return
+		}
 		affected, err := DeleteToken(token)
 		if err != nil {
 			panic(err)
@@ -577,6 +649,9 @@ func initDefinedWebhook(webhook *Webhook) {
 	}
 
 	if existed != nil {
+		if initDataNewOnly {
+			return
+		}
 		affected, err := DeleteWebhook(webhook)
 		if err != nil {
 			panic(err)
@@ -598,6 +673,9 @@ func initDefinedGroup(group *Group) {
 		panic(err)
 	}
 	if existed != nil {
+		if initDataNewOnly {
+			return
+		}
 		affected, err := deleteGroup(group)
 		if err != nil {
 			panic(err)
@@ -619,6 +697,9 @@ func initDefinedAdapter(adapter *Adapter) {
 		panic(err)
 	}
 	if existed != nil {
+		if initDataNewOnly {
+			return
+		}
 		affected, err := DeleteAdapter(adapter)
 		if err != nil {
 			panic(err)
@@ -634,12 +715,15 @@ func initDefinedAdapter(adapter *Adapter) {
 	}
 }
 
-func initDefinedEnforcer(enforcer *Enforcer) {
+func initDefinedEnforcer(enforcer *Enforcer, policies [][]string) {
 	existed, err := getEnforcer(enforcer.Owner, enforcer.Name)
 	if err != nil {
 		panic(err)
 	}
 	if existed != nil {
+		if initDataNewOnly {
+			return
+		}
 		affected, err := DeleteEnforcer(enforcer)
 		if err != nil {
 			panic(err)
@@ -653,6 +737,27 @@ func initDefinedEnforcer(enforcer *Enforcer) {
 	if err != nil {
 		panic(err)
 	}
+
+	err = enforcer.InitEnforcer()
+	if err != nil {
+		panic(err)
+	}
+
+	for _, policy := range policies {
+		if enforcer.HasPolicy(policy) {
+			continue
+		}
+
+		_, err = enforcer.AddPolicy(policy)
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	err = enforcer.SavePolicy()
+	if err != nil {
+		panic(err)
+	}
 }
 
 func initDefinedPlan(plan *Plan) {
@@ -661,6 +766,9 @@ func initDefinedPlan(plan *Plan) {
 		panic(err)
 	}
 	if existed != nil {
+		if initDataNewOnly {
+			return
+		}
 		affected, err := DeletePlan(plan)
 		if err != nil {
 			panic(err)
@@ -682,6 +790,9 @@ func initDefinedPricing(pricing *Pricing) {
 		panic(err)
 	}
 	if existed != nil {
+		if initDataNewOnly {
+			return
+		}
 		affected, err := DeletePricing(pricing)
 		if err != nil {
 			panic(err)
@@ -703,6 +814,9 @@ func initDefinedInvitation(invitation *Invitation) {
 		panic(err)
 	}
 	if existed != nil {
+		if initDataNewOnly {
+			return
+		}
 		affected, err := DeleteInvitation(invitation)
 		if err != nil {
 			panic(err)
@@ -718,7 +832,7 @@ func initDefinedInvitation(invitation *Invitation) {
 	}
 }
 
-func initDefinedRecord(record *casvisorsdk.Record) {
+func initDefinedRecord(record *Record) {
 	record.Id = 0
 	record.CreatedTime = util.GetCurrentTime()
 	_ = AddRecord(record)
@@ -738,6 +852,9 @@ func initDefinedSubscription(subscription *Subscription) {
 		panic(err)
 	}
 	if existed != nil {
+		if initDataNewOnly {
+			return
+		}
 		affected, err := DeleteSubscription(subscription)
 		if err != nil {
 			panic(err)
@@ -759,7 +876,10 @@ func initDefinedTransaction(transaction *Transaction) {
 		panic(err)
 	}
 	if existed != nil {
-		affected, err := DeleteTransaction(transaction)
+		if initDataNewOnly {
+			return
+		}
+		affected, err := DeleteTransaction(transaction, "en")
 		if err != nil {
 			panic(err)
 		}
@@ -768,7 +888,79 @@ func initDefinedTransaction(transaction *Transaction) {
 		}
 	}
 	transaction.CreatedTime = util.GetCurrentTime()
-	_, err = AddTransaction(transaction)
+	_, _, err = AddTransaction(transaction, "en", false)
+	if err != nil {
+		panic(err)
+	}
+}
+
+func initDefinedSite(site *Site) {
+	existed, err := getSite(site.Owner, site.Name)
+	if err != nil {
+		panic(err)
+	}
+	if existed != nil {
+		if initDataNewOnly {
+			return
+		}
+		affected, err := DeleteSite(site)
+		if err != nil {
+			panic(err)
+		}
+		if !affected {
+			panic("Fail to delete site")
+		}
+	}
+	site.CreatedTime = util.GetCurrentTime()
+	_, err = AddSite(site)
+	if err != nil {
+		panic(err)
+	}
+}
+
+func initDefinedRule(rule *Rule) {
+	existed, err := getRule(rule.Owner, rule.Name)
+	if err != nil {
+		panic(err)
+	}
+	if existed != nil {
+		if initDataNewOnly {
+			return
+		}
+		affected, err := DeleteRule(rule)
+		if err != nil {
+			panic(err)
+		}
+		if !affected {
+			panic("Fail to delete rule")
+		}
+	}
+	rule.CreatedTime = util.GetCurrentTime()
+	_, err = AddRule(rule)
+	if err != nil {
+		panic(err)
+	}
+}
+
+func initThirdPartyLinks(link *ThirdPartyLink) {
+	existed, err := GetThirdPartyLink(link.Owner, link.UserName, link.ProviderName)
+	if err != nil {
+		panic(err)
+	}
+	if existed != nil {
+		if initDataNewOnly {
+			return
+		}
+		affected, err := DeleteThirdPartyLink(link.Owner, link.UserName, link.ProviderName)
+		if err != nil {
+			panic(err)
+		}
+		if !affected {
+			panic("Fail to delete third party link")
+		}
+	}
+	link.CreatedTime = util.GetCurrentTime()
+	_, err = AddThirdPartyLink(link)
 	if err != nil {
 		panic(err)
 	}

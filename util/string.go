@@ -20,7 +20,6 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
-	"math/rand"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -29,7 +28,7 @@ import (
 	"time"
 	"unicode"
 
-	"github.com/google/uuid"
+	"github.com/nyaruka/phonenumbers"
 )
 
 func ParseInt(s string) int {
@@ -122,13 +121,13 @@ func SpaceToCamel(name string) string {
 	return strings.Join(words, "")
 }
 
-func GetOwnerAndNameFromId(id string) (string, string) {
+func GetOwnerAndNameFromIdWithError(id string) (string, string, error) {
 	tokens := strings.Split(id, "/")
 	if len(tokens) != 2 {
-		panic(errors.New("GetOwnerAndNameFromId() error, wrong token count for ID: " + id))
+		return "", "", errors.New("GetOwnerAndNameFromId() error, wrong token count for ID: " + id)
 	}
 
-	return tokens[0], tokens[1]
+	return tokens[0], tokens[1], nil
 }
 
 func GetOwnerFromId(id string) string {
@@ -154,8 +153,18 @@ func GetOwnerAndNameAndOtherFromId(id string) (string, string, string) {
 	return tokens[0], tokens[1], tokens[2]
 }
 
+func GetSharedOrgFromApp(rawName string) (name string, organization string) {
+	name = rawName
+	splitName := strings.Split(rawName, "-org-")
+	if len(splitName) >= 2 {
+		organization = splitName[len(splitName)-1]
+		name = splitName[0]
+	}
+	return name, organization
+}
+
 func GenerateId() string {
-	return uuid.NewString()
+	return GenerateUUID()
 }
 
 func GenerateTimeId() string {
@@ -163,7 +172,7 @@ func GenerateTimeId() string {
 	tm := time.Unix(timestamp, 0)
 	t := tm.Format("20060102_150405")
 
-	random := uuid.NewString()[0:7]
+	random := GenerateUUID()[0:7]
 
 	res := fmt.Sprintf("%s_%s", t, random)
 	return res
@@ -175,16 +184,6 @@ func GenerateSimpleTimeId() string {
 	t := tm.Format("20060102150405")
 
 	return t
-}
-
-func GetRandomName() string {
-	rand.Seed(time.Now().UnixNano())
-	const charset = "0123456789abcdefghijklmnopqrstuvwxyz"
-	result := make([]byte, 6)
-	for i := range result {
-		result[i] = charset[rand.Intn(len(charset))]
-	}
-	return string(result)
 }
 
 func GetId(owner, name string) string {
@@ -225,25 +224,6 @@ func WriteStringToPath(s string, path string) {
 	}
 }
 
-// SnakeString transform XxYy to xx_yy
-func SnakeString(s string) string {
-	data := make([]byte, 0, len(s)*2)
-	j := false
-	num := len(s)
-	for i := 0; i < num; i++ {
-		d := s[i]
-		if i > 0 && d >= 'A' && d <= 'Z' && j {
-			data = append(data, '_')
-		}
-		if d != '_' {
-			j = true
-		}
-		data = append(data, d)
-	}
-	result := strings.ToLower(string(data[:]))
-	return strings.ReplaceAll(result, " ", "")
-}
-
 func IsChinese(str string) bool {
 	var flag bool
 	for _, v := range str {
@@ -259,6 +239,35 @@ func GetMaskedPhone(phone string) string {
 	return rePhone.ReplaceAllString(phone, "$1****$2")
 }
 
+func GetSeperatedPhone(phone string) string {
+	if strings.HasPrefix(phone, "+") {
+		phoneNumberParsed, err := phonenumbers.Parse(phone, "")
+		if err != nil {
+			return phone
+		}
+
+		phone = fmt.Sprintf("%d", phoneNumberParsed.GetNationalNumber())
+	}
+
+	return phone
+}
+
+// ParseE164Phone parses an E.164 international phone number (e.g. "+49768456789")
+// and returns the national number string and the ISO 3166-1 alpha-2 region code (e.g. "768456789", "DE").
+// If the phone does not start with "+" or cannot be parsed, it returns the original phone and an empty region code.
+func ParseE164Phone(phone string) (nationalNumber string, regionCode string) {
+	if !strings.HasPrefix(phone, "+") {
+		return phone, ""
+	}
+	phoneNumberParsed, err := phonenumbers.Parse(phone, "")
+	if err != nil {
+		return phone, ""
+	}
+	nationalNumber = fmt.Sprintf("%d", phoneNumberParsed.GetNationalNumber())
+	regionCode = phonenumbers.GetRegionCodeForNumber(phoneNumberParsed)
+	return nationalNumber, regionCode
+}
+
 func GetMaskedEmail(email string) string {
 	if email == "" {
 		return ""
@@ -272,6 +281,9 @@ func GetMaskedEmail(email string) string {
 	username := maskString(tokens[0])
 	domain := tokens[1]
 	domainTokens := strings.Split(domain, ".")
+	if len(domainTokens) < 2 {
+		return fmt.Sprintf("%s@%s", username, maskString(domain))
+	}
 	domainTokens[len(domainTokens)-2] = maskString(domainTokens[len(domainTokens)-2])
 	return fmt.Sprintf("%s@%s", username, strings.Join(domainTokens, "."))
 }
@@ -330,7 +342,7 @@ func GetValueFromDataSourceName(key string, dataSourceName string) string {
 func GetUsernameFromEmail(email string) string {
 	tokens := strings.Split(email, "@")
 	if len(tokens) == 0 {
-		return uuid.NewString()
+		return GenerateUUID()
 	} else {
 		return tokens[0]
 	}
@@ -354,11 +366,40 @@ func StringToInterfaceArray(array []string) []interface{} {
 func StringToInterfaceArray2d(arrays [][]string) [][]interface{} {
 	var interfaceArrays [][]interface{}
 	for _, req := range arrays {
-		var interfaceArray []interface{}
-		for _, r := range req {
-			interfaceArray = append(interfaceArray, r)
+		var (
+			interfaceArray []interface{}
+			elem           interface{}
+		)
+		for _, elem = range req {
+			jStruct, err := TryJsonToAnonymousStruct(elem.(string))
+			if err == nil {
+				elem = jStruct
+			}
+			interfaceArray = append(interfaceArray, elem)
 		}
 		interfaceArrays = append(interfaceArrays, interfaceArray)
 	}
 	return interfaceArrays
+}
+
+// InterfaceToEnforceArray converts a []interface{} request for use in Casbin ABAC enforcement.
+// Each element is processed by InterfaceToEnforceValue: plain strings that are valid JSON
+// objects and map values decoded directly from JSON are both converted to anonymous structs
+// so Casbin can evaluate attribute-based rules with dot-notation (r.sub.Field).
+func InterfaceToEnforceArray(array []interface{}) []interface{} {
+	result := make([]interface{}, len(array))
+	for i, elem := range array {
+		result[i] = InterfaceToEnforceValue(elem)
+	}
+	return result
+}
+
+// InterfaceToEnforceArray2d applies InterfaceToEnforceArray to every row in a
+// two-dimensional slice, for use with Casbin BatchEnforce.
+func InterfaceToEnforceArray2d(arrays [][]interface{}) [][]interface{} {
+	result := make([][]interface{}, len(arrays))
+	for i, arr := range arrays {
+		result[i] = InterfaceToEnforceArray(arr)
+	}
+	return result
 }

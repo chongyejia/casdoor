@@ -27,6 +27,9 @@ type VerificationForm struct {
 	ApplicationId string `form:"applicationId"`
 	Method        string `form:"method"`
 	CheckUser     string `form:"checkUser"`
+	// SigninPath is the sign-in page a magic link comes back to, it carries the OAuth
+	// request the sign-in was started from
+	SigninPath string `form:"signinPath"`
 
 	CaptchaType  string `form:"captchaType"`
 	ClientSecret string `form:"clientSecret"`
@@ -47,7 +50,7 @@ func (form *VerificationForm) CheckParameter(checkType int, lang string) string 
 			return i18n.Translate(lang, "general:Missing parameter") + ": dest."
 		}
 		if form.CaptchaType == "" {
-			return i18n.Translate(lang, "general:Missing parameter") + ": checkType."
+			return i18n.Translate(lang, "general:Missing parameter") + ": captchaType."
 		}
 		if !strings.Contains(form.ApplicationId, "/") {
 			return i18n.Translate(lang, "verification:Wrong parameter") + ": applicationId."

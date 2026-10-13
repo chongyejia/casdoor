@@ -17,9 +17,10 @@ package idp
 import (
 	"bytes"
 	"crypto/sha1"
-	"encoding/base64"
+	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -29,7 +30,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/skip2/go-qrcode"
 	"golang.org/x/oauth2"
 )
 
@@ -46,6 +46,18 @@ type WeChatIdProvider struct {
 type WechatCacheMapValue struct {
 	IsScanned     bool
 	WechatUnionId string
+	ProviderName  string
+}
+
+func IsWechatTicketOfProvider(code string, providerName string) bool {
+	if !strings.HasPrefix(code, "wechat_oa:") {
+		return true
+	}
+
+	Lock.RLock()
+	defer Lock.RUnlock()
+	mapValue, ok := WechatCacheMap[code[10:]]
+	return ok && mapValue.ProviderName == providerName
 }
 
 func NewWeChatIdProvider(clientId string, clientSecret string, redirectUrl string) *WeChatIdProvider {
@@ -126,7 +138,7 @@ func (idp *WeChatIdProvider) GetToken(code string) (*oauth2.Token, error) {
 
 	// {"errcode":40163,"errmsg":"code been used, rid: 6206378a-793424c0-2e4091cc"}
 	if strings.Contains(buf.String(), "errcode") {
-		return nil, fmt.Errorf(buf.String())
+		return nil, errors.New(buf.String())
 	}
 
 	var wechatAccessToken WechatAccessToken
@@ -134,18 +146,18 @@ func (idp *WeChatIdProvider) GetToken(code string) (*oauth2.Token, error) {
 		return nil, err
 	}
 
-	token := oauth2.Token{
+	token := &oauth2.Token{
 		AccessToken:  wechatAccessToken.AccessToken,
 		TokenType:    "WeChatAccessToken",
 		RefreshToken: wechatAccessToken.RefreshToken,
 		Expiry:       time.Time{},
 	}
 
-	raw := make(map[string]string)
+	raw := make(map[string]interface{})
 	raw["Openid"] = wechatAccessToken.Openid
-	token.WithExtra(raw)
+	token = token.WithExtra(raw)
 
-	return &token, nil
+	return token, nil
 }
 
 //{
@@ -232,7 +244,7 @@ func (idp *WeChatIdProvider) GetUserInfo(token *oauth2.Token) (*UserInfo, error)
 	}
 
 	extra := make(map[string]string)
-	extra["wechat_unionid"] = wechatUserInfo.Openid
+	extra["wechat_unionid"] = wechatUserInfo.Unionid
 	// For WeChat, different appId corresponds to different openId
 	extra[BuildWechatOpenIdKey(idp.Config.ClientID)] = wechatUserInfo.Openid
 	userInfo := UserInfo{
@@ -299,12 +311,12 @@ func GetWechatOfficialAccountQRCode(clientId string, clientSecret string, provid
 	params := fmt.Sprintf(`{"expire_seconds": 3600, "action_name": "QR_STR_SCENE", "action_info": {"scene": {"scene_str": "%s"}}}`, providerId)
 
 	bodyData := bytes.NewReader([]byte(params))
-	requeset, err := http.NewRequest("POST", qrCodeUrl, bodyData)
+	request, err := http.NewRequest("POST", qrCodeUrl, bodyData)
 	if err != nil {
 		return "", "", err
 	}
 
-	resp, err := client.Do(requeset)
+	resp, err := client.Do(request)
 	if err != nil {
 		return "", "", err
 	}
@@ -324,10 +336,7 @@ func GetWechatOfficialAccountQRCode(clientId string, clientSecret string, provid
 		return "", "", err
 	}
 
-	var png []byte
-	png, err = qrcode.Encode(data.URL, qrcode.Medium, 256)
-	base64Image := base64.StdEncoding.EncodeToString(png)
-	return base64Image, data.Ticket, nil
+	return data.URL, data.Ticket, nil
 }
 
 func VerifyWechatSignature(token string, nonce string, timestamp string, signature string) bool {
@@ -342,5 +351,5 @@ func VerifyWechatSignature(token string, nonce string, timestamp string, signatu
 
 	b := sha1.Sum([]byte(tmpStr))
 	res := hex.EncodeToString(b[:])
-	return res == signature
+	return subtle.ConstantTimeCompare([]byte(res), []byte(signature)) == 1
 }

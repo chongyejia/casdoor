@@ -15,11 +15,13 @@
 package object
 
 import (
+	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/casdoor/casdoor/conf"
-
+	"github.com/casdoor/casdoor/i18n"
 	"github.com/casdoor/casdoor/util"
 	"github.com/xorm-io/core"
 )
@@ -29,13 +31,16 @@ type Role struct {
 	Name        string `xorm:"varchar(100) notnull pk" json:"name"`
 	CreatedTime string `xorm:"varchar(100)" json:"createdTime"`
 	DisplayName string `xorm:"varchar(100)" json:"displayName"`
-	Description string `xorm:"varchar(100)" json:"description"`
+	Description string `xorm:"mediumtext" json:"description"`
 
 	Users     []string `xorm:"mediumtext" json:"users"`
 	Groups    []string `xorm:"mediumtext" json:"groups"`
 	Roles     []string `xorm:"mediumtext" json:"roles"`
 	Domains   []string `xorm:"mediumtext" json:"domains"`
 	IsEnabled bool     `json:"isEnabled"`
+
+	// SourceGroups is only set when the role is resolved for a user, empty means it was assigned directly
+	SourceGroups []string `xorm:"-" json:"sourceGroups,omitempty"`
 }
 
 func GetRoleCount(owner, field, value string) (int64, error) {
@@ -87,7 +92,7 @@ func GetRole(id string) (*Role, error) {
 	return getRole(owner, name)
 }
 
-func UpdateRole(id string, role *Role) (bool, error) {
+func UpdateRole(id string, role *Role, isGlobalAdmin bool, lang string) (bool, error) {
 	owner, name := util.GetOwnerAndNameFromIdNoCheck(id)
 	oldRole, err := getRole(owner, name)
 	if err != nil {
@@ -98,41 +103,28 @@ func UpdateRole(id string, role *Role) (bool, error) {
 		return false, nil
 	}
 
-	visited := map[string]struct{}{}
-
-	permissions, err := GetPermissionsByRole(id)
-	if err != nil {
-		return false, err
+	if !isGlobalAdmin && oldRole.Owner != role.Owner {
+		return false, errors.New(i18n.Translate(lang, "auth:Unauthorized operation"))
 	}
 
-	for _, permission := range permissions {
-		removeGroupingPolicies(permission)
-		removePolicies(permission)
-		visited[permission.GetId()] = struct{}{}
-	}
-
-	ancestorRoles, err := GetAncestorRoles(id)
-	if err != nil {
-		return false, err
-	}
-
-	for _, r := range ancestorRoles {
-		permissions, err := GetPermissionsByRole(r.GetId())
+	renameRole := name != role.Name
+	oldPermissions := []*Permission{}
+	if renameRole {
+		oldPermissions, err = GetPermissionsByRole(id)
 		if err != nil {
 			return false, err
 		}
 
-		for _, permission := range permissions {
-			permissionId := permission.GetId()
-			if _, ok := visited[permissionId]; !ok {
-				removeGroupingPolicies(permission)
-				visited[permissionId] = struct{}{}
+		for _, permission := range oldPermissions {
+			err = removePolicies(permission)
+			if err != nil {
+				return false, err
 			}
 		}
 	}
 
-	if name != role.Name {
-		err := roleChangeTrigger(name, role.Name)
+	if renameRole {
+		err := roleChangeTrigger(owner, name, role.Name)
 		if err != nil {
 			return false, err
 		}
@@ -143,47 +135,16 @@ func UpdateRole(id string, role *Role) (bool, error) {
 		return false, err
 	}
 
-	visited = map[string]struct{}{}
-	newRoleID := role.GetId()
-	permissions, err = GetPermissionsByRole(newRoleID)
-	if err != nil {
-		return false, err
-	}
-
-	for _, permission := range permissions {
-		err = addGroupingPolicies(permission)
-		if err != nil {
-			return false, err
-		}
-
-		err = addPolicies(permission)
-		if err != nil {
-			return false, err
-		}
-
-		visited[permission.GetId()] = struct{}{}
-	}
-
-	ancestorRoles, err = GetAncestorRoles(newRoleID)
-	if err != nil {
-		return false, err
-	}
-
-	for _, r := range ancestorRoles {
-		permissions, err := GetPermissionsByRole(r.GetId())
+	if renameRole && affected != 0 {
+		permissions, err := GetPermissionsByRole(role.GetId())
 		if err != nil {
 			return false, err
 		}
 
 		for _, permission := range permissions {
-			permissionId := permission.GetId()
-			if _, ok := visited[permissionId]; !ok {
-				err = addGroupingPolicies(permission)
-				if err != nil {
-					return false, err
-				}
-
-				visited[permissionId] = struct{}{}
+			err = addPolicies(permission)
+			if err != nil {
+				return false, err
 			}
 		}
 	}
@@ -269,13 +230,13 @@ func (role *Role) GetId() string {
 	return fmt.Sprintf("%s/%s", role.Owner, role.Name)
 }
 
-func getRolesByUserInternal(userId string) ([]*Role, error) {
+func getRolesByUserInternal(userId string) ([]*Role, map[string][]string, error) {
 	user, err := GetUser(userId)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if user == nil {
-		return nil, fmt.Errorf("The user: %s doesn't exist", userId)
+		return nil, nil, fmt.Errorf("The user: %s doesn't exist", userId)
 	}
 
 	query := ormer.Engine.Alias("r").Where("r.users like ?", fmt.Sprintf("%%%s%%", userId))
@@ -286,20 +247,74 @@ func getRolesByUserInternal(userId string) ([]*Role, error) {
 	roles := []*Role{}
 	err = query.Find(&roles)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	res := []*Role{}
+	// a source is the group that granted the role, "" means it was assigned directly
+	sources := map[string][]string{}
 	for _, role := range roles {
-		if util.InSlice(role.Users, userId) || util.HaveIntersection(role.Groups, user.Groups) {
+		roleSources := []string{}
+		if util.InSlice(role.Users, userId) {
+			roleSources = append(roleSources, "")
+		}
+		for _, group := range role.Groups {
+			if util.InSlice(user.Groups, group) {
+				roleSources = append(roleSources, group)
+			}
+		}
+
+		if len(roleSources) != 0 {
 			res = append(res, role)
+			sources[role.GetId()] = roleSources
 		}
 	}
-	return res, nil
+	return res, sources, nil
+}
+
+func fillSourceGroups(roles []*Role, sources map[string][]string) {
+	resolved := map[string]map[string]bool{}
+	for _, role := range roles {
+		roleId := role.GetId()
+		resolved[roleId] = map[string]bool{}
+		for _, source := range sources[roleId] {
+			resolved[roleId][source] = true
+		}
+	}
+
+	for changed := true; changed; {
+		changed = false
+		for _, role := range roles {
+			roleId := role.GetId()
+			for _, subRoleId := range role.Roles {
+				for source := range resolved[subRoleId] {
+					if !resolved[roleId][source] {
+						resolved[roleId][source] = true
+						changed = true
+					}
+				}
+			}
+		}
+	}
+
+	for _, role := range roles {
+		roleSources := resolved[role.GetId()]
+		if roleSources[""] {
+			role.SourceGroups = nil
+			continue
+		}
+
+		sourceGroups := []string{}
+		for source := range roleSources {
+			sourceGroups = append(sourceGroups, source)
+		}
+		sort.Strings(sourceGroups)
+		role.SourceGroups = sourceGroups
+	}
 }
 
 func getRolesByUser(userId string) ([]*Role, error) {
-	roles, err := getRolesByUserInternal(userId)
+	roles, sources, err := getRolesByUserInternal(userId)
 	if err != nil {
 		return nil, err
 	}
@@ -314,6 +329,8 @@ func getRolesByUser(userId string) ([]*Role, error) {
 		return nil, err
 	}
 
+	fillSourceGroups(allRoles, sources)
+
 	for i := range allRoles {
 		allRoles[i].Users = nil
 	}
@@ -321,7 +338,7 @@ func getRolesByUser(userId string) ([]*Role, error) {
 	return allRoles, nil
 }
 
-func roleChangeTrigger(oldName string, newName string) error {
+func roleChangeTrigger(owner string, oldName string, newName string) error {
 	session := ormer.Engine.NewSession()
 	defer session.Close()
 
@@ -337,11 +354,23 @@ func roleChangeTrigger(oldName string, newName string) error {
 	}
 
 	for _, role := range roles {
+		changed := false
 		for j, u := range role.Roles {
-			owner, name := util.GetOwnerAndNameFromId(u)
-			if name == oldName {
-				role.Roles[j] = util.GetId(owner, newName)
+			if u == "*" {
+				continue
 			}
+
+			subOwner, subName, err := util.GetOwnerAndNameFromIdWithError(u)
+			if err != nil {
+				return err
+			}
+			if subOwner == owner && subName == oldName {
+				role.Roles[j] = util.GetId(subOwner, newName)
+				changed = true
+			}
+		}
+		if !changed {
+			continue
 		}
 		_, err = session.Where("name=?", role.Name).And("owner=?", role.Owner).Update(role)
 		if err != nil {
@@ -356,12 +385,24 @@ func roleChangeTrigger(oldName string, newName string) error {
 	}
 
 	for _, permission := range permissions {
+		changed := false
 		for j, u := range permission.Roles {
-			// u = organization/username
-			owner, name := util.GetOwnerAndNameFromId(u)
-			if name == oldName {
-				permission.Roles[j] = util.GetId(owner, newName)
+			// u = organization/rolename
+			if u == "*" {
+				continue
 			}
+
+			roleOwner, roleName, err := util.GetOwnerAndNameFromIdWithError(u)
+			if err != nil {
+				return err
+			}
+			if roleOwner == owner && roleName == oldName {
+				permission.Roles[j] = util.GetId(roleOwner, newName)
+				changed = true
+			}
+		}
+		if !changed {
+			continue
 		}
 		_, err = session.Where("name=?", permission.Name).And("owner=?", permission.Owner).Update(permission)
 		if err != nil {

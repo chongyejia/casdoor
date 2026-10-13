@@ -17,9 +17,7 @@ package controllers
 import (
 	"encoding/json"
 
-	"github.com/casvisor/casvisor-go-sdk/casvisorsdk"
-
-	"github.com/beego/beego/utils/pagination"
+	"github.com/beego/beego/v2/core/utils/pagination"
 	"github.com/casdoor/casdoor/object"
 	"github.com/casdoor/casdoor/util"
 )
@@ -38,16 +36,16 @@ func (c *ApiController) GetRecords() {
 		return
 	}
 
-	limit := c.Input().Get("pageSize")
-	page := c.Input().Get("p")
-	field := c.Input().Get("field")
-	value := c.Input().Get("value")
-	sortField := c.Input().Get("sortField")
-	sortOrder := c.Input().Get("sortOrder")
-	organizationName := c.Input().Get("organizationName")
+	limit := c.Ctx.Input.Query("pageSize")
+	page := c.Ctx.Input.Query("p")
+	field := c.Ctx.Input.Query("field")
+	value := c.Ctx.Input.Query("value")
+	sortField := c.Ctx.Input.Query("sortField")
+	sortOrder := c.Ctx.Input.Query("sortOrder")
+	organizationName := c.Ctx.Input.Query("organizationName")
 
 	if limit == "" || page == "" {
-		records, err := object.GetRecords()
+		records, err := object.GetRecords(organization)
 		if err != nil {
 			c.ResponseError(err.Error())
 			return
@@ -59,14 +57,14 @@ func (c *ApiController) GetRecords() {
 		if c.IsGlobalAdmin() && organizationName != "" {
 			organization = organizationName
 		}
-		filterRecord := &casvisorsdk.Record{Organization: organization}
+		filterRecord := &object.Record{Organization: organization}
 		count, err := object.GetRecordCount(field, value, filterRecord)
 		if err != nil {
 			c.ResponseError(err.Error())
 			return
 		}
 
-		paginator := pagination.SetPaginator(c.Ctx, limit, count)
+		paginator := pagination.NewPaginator(c.Ctx.Request, limit, count)
 		records, err := object.GetPaginationRecords(paginator.Offset(), limit, field, value, sortField, sortOrder, filterRecord)
 		if err != nil {
 			c.ResponseError(err.Error())
@@ -85,18 +83,22 @@ func (c *ApiController) GetRecords() {
 // @Success 200 {object} object.Record The Response object
 // @router /get-records-filter [post]
 func (c *ApiController) GetRecordsByFilter() {
-	_, ok := c.RequireAdmin()
+	organization, ok := c.RequireAdmin()
 	if !ok {
 		return
 	}
 
 	body := string(c.Ctx.Input.RequestBody)
 
-	record := &casvisorsdk.Record{}
+	record := &object.Record{}
 	err := util.JsonToStruct(body, record)
 	if err != nil {
 		c.ResponseError(err.Error())
 		return
+	}
+
+	if organization != "" {
+		record.Owner, record.Organization = organization, organization
 	}
 
 	records, err := object.GetRecordsByField(record)
@@ -116,7 +118,7 @@ func (c *ApiController) GetRecordsByFilter() {
 // @Success 200 {object} controllers.Response The Response object
 // @router /add-record [post]
 func (c *ApiController) AddRecord() {
-	var record casvisorsdk.Record
+	var record object.Record
 	err := json.Unmarshal(c.Ctx.Input.RequestBody, &record)
 	if err != nil {
 		c.ResponseError(err.Error())

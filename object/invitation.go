@@ -90,7 +90,10 @@ func getInvitation(owner string, name string) (*Invitation, error) {
 }
 
 func GetInvitation(id string) (*Invitation, error) {
-	owner, name := util.GetOwnerAndNameFromId(id)
+	owner, name, err := util.GetOwnerAndNameFromIdWithError(id)
+	if err != nil {
+		return nil, err
+	}
 	return getInvitation(owner, name)
 }
 
@@ -133,7 +136,10 @@ func GetMaskedInvitation(invitation *Invitation) *Invitation {
 }
 
 func UpdateInvitation(id string, invitation *Invitation, lang string) (bool, error) {
-	owner, name := util.GetOwnerAndNameFromId(id)
+	owner, name, err := util.GetOwnerAndNameFromIdWithError(id)
+	if err != nil {
+		return false, err
+	}
 	if p, err := getInvitation(owner, name); err != nil {
 		return false, err
 	} else if p == nil {
@@ -146,7 +152,7 @@ func UpdateInvitation(id string, invitation *Invitation, lang string) (bool, err
 		invitation.IsRegexp = isRegexp
 	}
 
-	err := CheckInvitationDefaultCode(invitation.Code, invitation.DefaultCode, lang)
+	err = CheckInvitationDefaultCode(invitation.Code, invitation.DefaultCode, lang)
 	if err != nil {
 		return false, err
 	}
@@ -234,4 +240,9 @@ func (invitation *Invitation) IsInvitationCodeValid(application *Application, in
 		return false, i18n.Translate(lang, "check:Please register using the phone  corresponding to the invitation code")
 	}
 	return true, ""
+}
+
+func (invitation *Invitation) GetInvitationLink(host string, application string) string {
+	frontEnd, _ := getOriginFromHost(host)
+	return fmt.Sprintf("%s/signup/%s?invitationCode=%s", frontEnd, application, invitation.Code)
 }

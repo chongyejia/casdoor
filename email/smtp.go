@@ -17,6 +17,7 @@ package email
 import (
 	"crypto/tls"
 
+	"github.com/casdoor/casdoor/conf"
 	"github.com/casdoor/gomail/v2"
 )
 
@@ -24,23 +25,40 @@ type SmtpEmailProvider struct {
 	Dialer *gomail.Dialer
 }
 
-func NewSmtpEmailProvider(userName string, password string, host string, port int, typ string, disableSsl bool) *SmtpEmailProvider {
-	dialer := &gomail.Dialer{}
-	dialer = gomail.NewDialer(host, port, userName, password)
+func NewSmtpEmailProvider(userName string, password string, host string, port int, typ string, sslMode string, enableProxy bool) *SmtpEmailProvider {
+	dialer := gomail.NewDialer(host, port, userName, password)
 	if typ == "SUBMAIL" {
 		dialer.TLSConfig = &tls.Config{InsecureSkipVerify: true}
 	}
 
-	dialer.SSL = !disableSsl
+	// Handle SSL mode: "Auto" (or empty) means don't override gomail's default behavior
+	// "Enable" means force SSL on, "Disable" means force SSL off
+	if sslMode == "Enable" {
+		dialer.SSL = true
+	} else if sslMode == "Disable" {
+		dialer.SSL = false
+	}
+	// If sslMode is "Auto" or empty, don't set dialer.SSL - let gomail decide based on port
+
+	if enableProxy {
+		socks5Proxy := conf.GetConfigString("socks5Proxy")
+		if socks5Proxy != "" {
+			dialer.SetSocks5Proxy(socks5Proxy)
+		}
+	}
 
 	return &SmtpEmailProvider{Dialer: dialer}
 }
 
-func (s *SmtpEmailProvider) Send(fromAddress string, fromName string, toAddress string, subject string, content string) error {
+func (s *SmtpEmailProvider) Send(fromAddress string, fromName string, toAddresses []string, subject string, content string) error {
 	message := gomail.NewMessage()
 
 	message.SetAddressHeader("From", fromAddress, fromName)
-	message.SetHeader("To", toAddress)
+	var addresses []string
+	for _, address := range toAddresses {
+		addresses = append(addresses, message.FormatAddress(address, ""))
+	}
+	message.SetHeader("To", addresses...)
 	message.SetHeader("Subject", subject)
 	message.SetBody("text/html", content)
 

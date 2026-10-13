@@ -5,6 +5,7 @@
 *.so
 *.dylib
 *.swp
+/server_*
 
 # Test binary, built with `go test -c`
 *.test
@@ -19,6 +20,7 @@ bin/
 .idea/
 *.iml
 .vscode/settings.json
+.claude
 
 tmp/
 tmpFiles/
@@ -30,7 +32,14 @@ commentsRouter*.go
 
 # ignore build result
 casdoor
-server
+/server
 
-# include helm-chart
+# include helm-chart, but not its packaged output
 !manifests/casdoor
+*.tgz
+
+# the console has its own .gitignore for these; web-old does not
+web/cypress/videos/
+web/cypress/screenshots/
+web-old/cypress/videos/
+web-old/cypress/screenshots/

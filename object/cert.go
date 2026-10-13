@@ -16,9 +16,12 @@ package object
 
 import (
 	"fmt"
+	"time"
 
+	"github.com/casdoor/casdoor/certificate"
 	"github.com/casdoor/casdoor/util"
 	"github.com/xorm-io/core"
+	"golang.org/x/net/publicsuffix"
 )
 
 type Cert struct {
@@ -33,6 +36,13 @@ type Cert struct {
 	BitSize         int    `json:"bitSize"`
 	ExpireInYears   int    `json:"expireInYears"`
 
+	ExpireTime       string `xorm:"varchar(100)" json:"expireTime"`
+	DomainExpireTime string `xorm:"varchar(100)" json:"domainExpireTime"`
+	Provider         string `xorm:"varchar(100)" json:"provider"`
+	Account          string `xorm:"varchar(100)" json:"account"`
+	AccessKey        string `xorm:"varchar(100)" json:"accessKey"`
+	AccessSecret     string `xorm:"varchar(100)" json:"accessSecret"`
+
 	Certificate string `xorm:"mediumtext" json:"certificate"`
 	PrivateKey  string `xorm:"mediumtext" json:"privateKey"`
 }
@@ -42,18 +52,13 @@ func GetMaskedCert(cert *Cert) *Cert {
 		return nil
 	}
 
+	if cert.PrivateKey != "" {
+		cert.PrivateKey = "***"
+	}
+	if cert.AccessSecret != "" {
+		cert.AccessSecret = "***"
+	}
 	return cert
-}
-
-func GetMaskedCerts(certs []*Cert, err error) ([]*Cert, error) {
-	if err != nil {
-		return nil, err
-	}
-
-	for _, cert := range certs {
-		cert = GetMaskedCert(cert)
-	}
-	return certs, nil
 }
 
 func GetCertCount(owner, field, value string) (int64, error) {
@@ -63,7 +68,11 @@ func GetCertCount(owner, field, value string) (int64, error) {
 
 func GetCerts(owner string) ([]*Cert, error) {
 	certs := []*Cert{}
-	err := ormer.Engine.Where("owner = ? or owner = ? ", "admin", owner).Desc("created_time").Find(&certs, &Cert{})
+	db := ormer.Engine.NewSession()
+	if owner != "" {
+		db = db.Where("owner = ? or owner = ? ", "admin", owner)
+	}
+	err := db.Desc("created_time").Find(&certs, &Cert{})
 	if err != nil {
 		return certs, err
 	}
@@ -126,31 +135,24 @@ func getCert(owner string, name string) (*Cert, error) {
 	}
 }
 
-func getCertByName(name string) (*Cert, error) {
-	if name == "" {
-		return nil, nil
-	}
-
-	cert := Cert{Name: name}
-	existed, err := ormer.Engine.Get(&cert)
-	if err != nil {
-		return &cert, nil
-	}
-
-	if existed {
-		return &cert, nil
-	} else {
-		return nil, nil
-	}
-}
-
 func GetCert(id string) (*Cert, error) {
-	owner, name := util.GetOwnerAndNameFromId(id)
-	return getCert(owner, name)
+	owner, name, err := util.GetOwnerAndNameFromIdWithError(id)
+	if err != nil {
+		return nil, err
+	}
+	cert, err := getCert(owner, name)
+	if cert == nil && owner != "admin" {
+		return getCert("admin", name)
+	} else {
+		return cert, err
+	}
 }
 
 func UpdateCert(id string, cert *Cert) (bool, error) {
-	owner, name := util.GetOwnerAndNameFromId(id)
+	owner, name, err := util.GetOwnerAndNameFromIdWithError(id)
+	if err != nil {
+		return false, err
+	}
 	if c, err := getCert(owner, name); err != nil {
 		return false, err
 	} else if c == nil {
@@ -158,13 +160,13 @@ func UpdateCert(id string, cert *Cert) (bool, error) {
 	}
 
 	if name != cert.Name {
-		err := certChangeTrigger(name, cert.Name)
+		err = certChangeTrigger(owner, name, cert.Name)
 		if err != nil {
 			return false, err
 		}
 	}
 
-	err := cert.populateContent()
+	err = cert.populateContent()
 	if err != nil {
 		return false, err
 	}
@@ -209,6 +211,20 @@ func (p *Cert) populateContent() error {
 		return nil
 	}
 
+	if p.Type == "SSL" {
+		if p.Certificate != "" {
+			expireTime, err := util.GetCertExpireTime(p.Certificate)
+			if err != nil {
+				return err
+			}
+
+			p.ExpireTime = expireTime
+		} else {
+			p.ExpireTime = ""
+		}
+		return nil
+	}
+
 	if len(p.CryptoAlgorithm) < 3 {
 		err := fmt.Errorf("populateContent() error, unsupported crypto algorithm: %s", p.CryptoAlgorithm)
 		return err
@@ -243,9 +259,45 @@ func (p *Cert) populateContent() error {
 	return nil
 }
 
+func RenewCert(cert *Cert) (bool, error) {
+	useProxy := false
+	if cert.Provider == "GoDaddy" {
+		useProxy = true
+	}
+
+	client, err := GetAcmeClient(useProxy)
+	if err != nil {
+		return false, err
+	}
+
+	var certStr, privateKey string
+	if cert.Provider == "Aliyun" {
+		certStr, privateKey, err = certificate.ObtainCertificateAli(client, cert.Name, cert.AccessKey, cert.AccessSecret)
+	} else if cert.Provider == "GoDaddy" {
+		certStr, privateKey, err = certificate.ObtainCertificateGoDaddy(client, cert.Name, cert.AccessKey, cert.AccessSecret)
+	} else {
+		return false, fmt.Errorf("unknown provider: %s", cert.Provider)
+	}
+
+	if err != nil {
+		return false, err
+	}
+
+	expireTime, err := util.GetCertExpireTime(certStr)
+	if err != nil {
+		return false, err
+	}
+
+	cert.ExpireTime = expireTime
+	cert.Certificate = certStr
+	cert.PrivateKey = privateKey
+
+	return UpdateCert(cert.GetId(), cert)
+}
+
 func getCertByApplication(application *Application) (*Cert, error) {
 	if application.Cert != "" {
-		return getCertByName(application.Cert)
+		return GetCert(util.GetId(application.Organization, application.Cert))
 	} else {
 		return GetDefaultCert()
 	}
@@ -255,7 +307,7 @@ func GetDefaultCert() (*Cert, error) {
 	return getCert("admin", "cert-built-in")
 }
 
-func certChangeTrigger(oldName string, newName string) error {
+func certChangeTrigger(owner string, oldName string, newName string) error {
 	session := ormer.Engine.NewSession()
 	defer session.Close()
 
@@ -264,12 +316,85 @@ func certChangeTrigger(oldName string, newName string) error {
 		return err
 	}
 
-	application := new(Application)
-	application.Cert = newName
-	_, err = session.Where("cert=?", oldName).Update(application)
+	// global ("admin") certs are visible to every organization, others only to their own
+	appSession := session.Where("cert=?", oldName)
+	if owner != "admin" {
+		appSession = appSession.And("organization=?", owner)
+	}
+	_, err = appSession.Cols("cert").Update(&Application{Cert: newName})
+	if err != nil {
+		return err
+	}
+
+	providerSession := session.Where("cert=?", oldName)
+	if owner != "admin" {
+		providerSession = providerSession.And("owner=?", owner)
+	}
+	_, err = providerSession.Cols("cert").Update(&Provider{Cert: newName})
 	if err != nil {
 		return err
 	}
 
 	return session.Commit()
+}
+
+func getBaseDomain(domain string) (string, error) {
+	// abc.com -> abc.com
+	// abc.com.it -> abc.com.it
+	// subdomain.abc.io -> abc.io
+	// subdomain.abc.org.us -> abc.org.us
+	return publicsuffix.EffectiveTLDPlusOne(domain)
+}
+
+func GetCertByDomain(domain string) (*Cert, error) {
+	if domain == "" {
+		return nil, fmt.Errorf("GetCertByDomain() error: domain should not be empty")
+	}
+
+	cert, ok := certMap[domain]
+	if ok {
+		return cert, nil
+	}
+
+	baseDomain, err := getBaseDomain(domain)
+	if err != nil {
+		return nil, err
+	}
+
+	cert, ok = certMap[baseDomain]
+	if ok {
+		return cert, nil
+	}
+
+	return nil, nil
+}
+
+func getCertMap() (map[string]*Cert, error) {
+	certs, err := GetGlobalCerts()
+	if err != nil {
+		return nil, err
+	}
+
+	res := map[string]*Cert{}
+	for _, cert := range certs {
+		res[cert.Name] = cert
+	}
+	return res, nil
+}
+
+func (p *Cert) isCertNearExpire() (bool, error) {
+	if p.ExpireTime == "" {
+		return true, nil
+	}
+
+	expireTime, err := time.Parse(time.RFC3339, p.ExpireTime)
+	if err != nil {
+		return false, err
+	}
+
+	now := time.Now()
+	duration := expireTime.Sub(now)
+	res := duration <= 7*24*time.Hour
+
+	return res, nil
 }

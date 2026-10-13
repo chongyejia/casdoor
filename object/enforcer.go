@@ -16,6 +16,7 @@ package object
 
 import (
 	"fmt"
+	"slices"
 
 	"github.com/casbin/casbin/v2"
 	"github.com/casdoor/casdoor/util"
@@ -29,7 +30,7 @@ type Enforcer struct {
 	CreatedTime string `xorm:"varchar(100)" json:"createdTime"`
 	UpdatedTime string `xorm:"varchar(100) updated" json:"updatedTime"`
 	DisplayName string `xorm:"varchar(100)" json:"displayName"`
-	Description string `xorm:"varchar(100)" json:"description"`
+	Description string `xorm:"mediumtext" json:"description"`
 
 	Model   string `xorm:"varchar(100)" json:"model"`
 	Adapter string `xorm:"varchar(100)" json:"adapter"`
@@ -83,12 +84,18 @@ func getEnforcer(owner string, name string) (*Enforcer, error) {
 }
 
 func GetEnforcer(id string) (*Enforcer, error) {
-	owner, name := util.GetOwnerAndNameFromId(id)
+	owner, name, err := util.GetOwnerAndNameFromIdWithError(id)
+	if err != nil {
+		return nil, err
+	}
 	return getEnforcer(owner, name)
 }
 
 func UpdateEnforcer(id string, enforcer *Enforcer) (bool, error) {
-	owner, name := util.GetOwnerAndNameFromId(id)
+	owner, name, err := util.GetOwnerAndNameFromIdWithError(id)
+	if err != nil {
+		return false, err
+	}
 	if oldEnforcer, err := getEnforcer(owner, name); err != nil {
 		return false, err
 	} else if oldEnforcer == nil {
@@ -164,7 +171,7 @@ func (enforcer *Enforcer) InitEnforcer() error {
 		return err
 	}
 
-	casbinEnforcer, err := casbin.NewEnforcer(m.Model, a.Adapter)
+	casbinEnforcer, err := casbin.NewEnforcer(m.Model, NewSafeAdapter(a))
 	if err != nil {
 		return err
 	}
@@ -189,21 +196,136 @@ func GetInitializedEnforcer(enforcerId string) (*Enforcer, error) {
 }
 
 func GetPolicies(id string) ([]*xormadapter.CasbinRule, error) {
+	enforcer, err := GetEnforcer(id)
+	if err != nil {
+		return nil, err
+	}
+	if enforcer == nil {
+		return nil, fmt.Errorf("the enforcer: %s is not found", id)
+	}
+
+	a, err := GetAdapter(enforcer.Adapter)
+	if err != nil {
+		return nil, err
+	} else if a == nil {
+		return nil, fmt.Errorf("the adapter: %s for enforcer: %s is not found", enforcer.Adapter, enforcer.GetId())
+	}
+
+	err = a.InitAdapter()
+	if err != nil {
+		return nil, err
+	}
+
+	return NewSafeAdapter(a).GetRules()
+}
+
+// Filter represents filter criteria with optional policy type
+type Filter struct {
+	Ptype       string   `json:"ptype,omitempty"`
+	FieldIndex  *int     `json:"fieldIndex,omitempty"`
+	FieldValues []string `json:"fieldValues"`
+}
+
+func GetFilteredPolicies(id string, ptype string, fieldIndex int, fieldValues ...string) ([]*xormadapter.CasbinRule, error) {
 	enforcer, err := GetInitializedEnforcer(id)
 	if err != nil {
 		return nil, err
 	}
 
-	pRules := enforcer.GetPolicy()
-	res := util.MatrixToCasbinRules("p", pRules)
+	var allRules [][]string
 
-	if enforcer.GetModel()["g"] != nil {
-		gRules := enforcer.GetGroupingPolicy()
-		res2 := util.MatrixToCasbinRules("g", gRules)
-		res = append(res, res2...)
+	if len(fieldValues) == 0 {
+		if ptype == "g" {
+			allRules = enforcer.GetFilteredGroupingPolicy(fieldIndex)
+		} else {
+			allRules = enforcer.GetFilteredPolicy(fieldIndex)
+		}
+	} else {
+		for _, value := range fieldValues {
+			if ptype == "g" {
+				rules := enforcer.GetFilteredGroupingPolicy(fieldIndex, value)
+				allRules = append(allRules, rules...)
+			} else {
+				rules := enforcer.GetFilteredPolicy(fieldIndex, value)
+				allRules = append(allRules, rules...)
+			}
+		}
 	}
 
+	res := util.MatrixToCasbinRules(ptype, allRules)
 	return res, nil
+}
+
+// GetFilteredPoliciesMulti applies multiple filters to policies
+// Doing this in our loop is more efficient than using GetFilteredGroupingPolicy / GetFilteredPolicy which
+// iterates over all policies again and again
+func GetFilteredPoliciesMulti(id string, filters []Filter) ([]*xormadapter.CasbinRule, error) {
+	// Get all policies first
+	allPolicies, err := GetPolicies(id)
+	if err != nil {
+		return nil, err
+	}
+
+	// Filter policies based on multiple criteria
+	var filteredPolicies []*xormadapter.CasbinRule
+	if len(filters) == 0 {
+		// No filters, return all policies
+		return allPolicies, nil
+	} else {
+		for _, policy := range allPolicies {
+			matchesAllFilters := true
+			for _, filter := range filters {
+				// Default policy type if unspecified
+				if filter.Ptype == "" {
+					filter.Ptype = "p"
+				}
+				// Always check policy type
+				if policy.Ptype != filter.Ptype {
+					matchesAllFilters = false
+					break
+				}
+
+				// If FieldIndex is nil, only filter via ptype (skip field-value checks)
+				if filter.FieldIndex == nil {
+					continue
+				}
+
+				fieldIndex := *filter.FieldIndex
+				// If FieldIndex is out of range, also only filter via ptype
+				if fieldIndex < 0 || fieldIndex > 5 {
+					continue
+				}
+
+				var fieldValue string
+				switch fieldIndex {
+				case 0:
+					fieldValue = policy.V0
+				case 1:
+					fieldValue = policy.V1
+				case 2:
+					fieldValue = policy.V2
+				case 3:
+					fieldValue = policy.V3
+				case 4:
+					fieldValue = policy.V4
+				case 5:
+					fieldValue = policy.V5
+				}
+
+				// When FieldIndex is provided and valid, enforce FieldValues (if any)
+				if len(filter.FieldValues) > 0 && !slices.Contains(filter.FieldValues, fieldValue) {
+					matchesAllFilters = false
+					break
+				}
+			}
+
+			if matchesAllFilters {
+				filteredPolicies = append(filteredPolicies, policy)
+			}
+		}
+	}
+
+	return filteredPolicies, nil
 }
 
 func UpdatePolicy(id string, ptype string, oldPolicy []string, newPolicy []string) (bool, error) {
@@ -250,7 +372,7 @@ func (enforcer *Enforcer) LoadModelCfg() error {
 		return nil
 	}
 
-	model, err := GetModelEx(enforcer.Model)
+	model, err := getModelEx(enforcer.Model)
 	if err != nil {
 		return err
 	} else if model == nil {

@@ -15,6 +15,7 @@
 package idp
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -86,8 +87,9 @@ import (
 )
 
 type GothIdProvider struct {
-	Provider goth.Provider
-	Session  goth.Session
+	Provider     goth.Provider
+	Session      goth.Session
+	CodeVerifier string
 }
 
 func NewGothIdProvider(providerType string, clientId string, clientSecret string, clientId2 string, clientSecret2 string, redirectUrl string, hostUrl string) (*GothIdProvider, error) {
@@ -278,9 +280,16 @@ func NewGothIdProvider(providerType string, clientId string, clientSecret string
 			Session:  &naver.Session{},
 		}
 	case "Nextcloud":
-		idp = GothIdProvider{
-			Provider: nextcloud.New(clientId, clientSecret, redirectUrl),
-			Session:  &nextcloud.Session{},
+		if hostUrl != "" {
+			idp = GothIdProvider{
+				Provider: nextcloud.NewCustomisedDNS(clientId, clientSecret, redirectUrl, hostUrl),
+				Session:  &nextcloud.Session{},
+			}
+		} else {
+			idp = GothIdProvider{
+				Provider: nextcloud.New(clientId, clientSecret, redirectUrl),
+				Session:  &nextcloud.Session{},
+			}
 		}
 	case "OneDrive":
 		idp = GothIdProvider{
@@ -440,7 +449,13 @@ func (idp *GothIdProvider) GetToken(code string) (*oauth2.Token, error) {
 		value = url.Values{}
 		value.Add("code", code)
 		if idp.Provider.Name() == "twitterv2" || idp.Provider.Name() == "fitbit" {
-			value.Add("oauth_verifier", "casdoor-verifier")
+			// Use dynamic code verifier if provided, otherwise fall back to static one
+			verifier := idp.CodeVerifier
+			if verifier == "" {
+				verifier = "casdoor-verifier"
+			}
+			// RFC 7636 PKCE uses 'code_verifier' parameter
+			value.Add("code_verifier", verifier)
 		}
 	}
 	accessToken, err := idp.Session.Authorize(idp.Provider, value)
@@ -477,6 +492,42 @@ func getUser(gothUser goth.User, provider string) *UserInfo {
 		Email:       gothUser.Email,
 		AvatarUrl:   gothUser.AvatarURL,
 	}
+
+	// Capture additional fields in Extra
+	extra := make(map[string]string)
+	if gothUser.FirstName != "" {
+		extra["firstName"] = gothUser.FirstName
+	}
+	if gothUser.LastName != "" {
+		extra["lastName"] = gothUser.LastName
+	}
+	if gothUser.Location != "" {
+		extra["location"] = gothUser.Location
+	}
+	if gothUser.Description != "" {
+		extra["description"] = gothUser.Description
+	}
+	// Add all raw data from the provider
+	for k, v := range gothUser.RawData {
+		if v != nil {
+			switch val := v.(type) {
+			case string:
+				extra[k] = val
+			case float64:
+				extra[k] = fmt.Sprintf("%v", val)
+			case bool:
+				extra[k] = fmt.Sprintf("%v", val)
+			default:
+				// For complex types, marshal to JSON string
+				if jsonVal, err := json.Marshal(val); err == nil {
+					extra[k] = string(jsonVal)
+				}
+			}
+		}
+	}
+	user.Extra = extra
+	user.EmailVerified = isGothEmailVerified(gothUser, provider)
+
 	// Some idp return an empty Name
 	// so construct the Name with firstname and lastname or nickname
 	if user.Username == "" {
@@ -500,6 +551,34 @@ func getUser(gothUser goth.User, provider string) *UserInfo {
 		user.Username = util.GetUsernameFromEmail(user.Email)
 	}
 	return &user
+}
+
+// gothEmailVerifiedProviders only ever return an email the account has confirmed.
+var gothEmailVerifiedProviders = map[string]bool{
+	"facebook": true,
+	"github":   true,
+	"gitlab":   true,
+	"google":   true,
+	"linkedin": true,
+	"slack":    true,
+	"yahoo":    true,
+}
+
+// isGothEmailVerified reports whether the provider vouches for gothUser.Email, from the
+// email_verified / verified claim it returned or because it never returns unverified ones.
+func isGothEmailVerified(gothUser goth.User, provider string) bool {
+	if gothUser.Email == "" {
+		return false
+	}
+	for _, key := range []string{"email_verified", "verified_email", "verified"} {
+		switch v := gothUser.RawData[key].(type) {
+		case bool:
+			return v
+		case string:
+			return v == "true"
+		}
+	}
+	return gothEmailVerifiedProviders[provider]
 }
 
 func getName(firstName, lastName string) string {

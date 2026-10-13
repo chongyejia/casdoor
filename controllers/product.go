@@ -17,8 +17,9 @@ package controllers
 import (
 	"encoding/json"
 	"fmt"
+	"strconv"
 
-	"github.com/beego/beego/utils/pagination"
+	"github.com/beego/beego/v2/core/utils/pagination"
 	"github.com/casdoor/casdoor/object"
 	"github.com/casdoor/casdoor/util"
 )
@@ -31,13 +32,13 @@ import (
 // @Success 200 {array} object.Product The Response object
 // @router /get-products [get]
 func (c *ApiController) GetProducts() {
-	owner := c.Input().Get("owner")
-	limit := c.Input().Get("pageSize")
-	page := c.Input().Get("p")
-	field := c.Input().Get("field")
-	value := c.Input().Get("value")
-	sortField := c.Input().Get("sortField")
-	sortOrder := c.Input().Get("sortOrder")
+	owner := c.Ctx.Input.Query("owner")
+	limit := c.Ctx.Input.Query("pageSize")
+	page := c.Ctx.Input.Query("p")
+	field := c.Ctx.Input.Query("field")
+	value := c.Ctx.Input.Query("value")
+	sortField := c.Ctx.Input.Query("sortField")
+	sortOrder := c.Ctx.Input.Query("sortOrder")
 
 	if limit == "" || page == "" {
 		products, err := object.GetProducts(owner)
@@ -55,7 +56,7 @@ func (c *ApiController) GetProducts() {
 			return
 		}
 
-		paginator := pagination.SetPaginator(c.Ctx, limit, count)
+		paginator := pagination.NewPaginator(c.Ctx.Request, limit, count)
 		products, err := object.GetPaginationProducts(owner, paginator.Offset(), limit, field, value, sortField, sortOrder)
 		if err != nil {
 			c.ResponseError(err.Error())
@@ -74,7 +75,7 @@ func (c *ApiController) GetProducts() {
 // @Success 200 {object} object.Product The Response object
 // @router /get-product [get]
 func (c *ApiController) GetProduct() {
-	id := c.Input().Get("id")
+	id := c.Ctx.Input.Query("id")
 
 	product, err := object.GetProduct(id)
 	if err != nil {
@@ -100,7 +101,7 @@ func (c *ApiController) GetProduct() {
 // @Success 200 {object} controllers.Response The Response object
 // @router /update-product [post]
 func (c *ApiController) UpdateProduct() {
-	id := c.Input().Get("id")
+	id := c.Ctx.Input.Query("id")
 
 	var product object.Product
 	err := json.Unmarshal(c.Ctx.Input.RequestBody, &product)
@@ -152,26 +153,54 @@ func (c *ApiController) DeleteProduct() {
 }
 
 // BuyProduct
-// @Title BuyProduct
+// @Title BuyProduct (Deprecated)
 // @Tag Product API
-// @Description buy product
-// @Param   id     query    string  true        "The id ( owner/name ) of the product"
-// @Param   providerName    query    string  true  "The name of the provider"
+// @Description buy product using the deprecated compatibility endpoint, prefer place-order plus pay-order for new integrations
+// @Param   id             query    string  true   "The id ( owner/name ) of the product"
+// @Param   providerName   query    string  true   "The name of the provider"
+// @Param   pricingName    query    string  false  "The name of the pricing (for subscription)"
+// @Param   planName       query    string  false  "The name of the plan (for subscription)"
+// @Param   userName       query    string  false  "The username to buy product for (admin only)"
+// @Param   paymentEnv     query    string  false  "The payment environment"
+// @Param   customPrice    query    number  false  "Custom price for recharge products"
 // @Success 200 {object} controllers.Response The Response object
 // @router /buy-product [post]
 func (c *ApiController) BuyProduct() {
-	id := c.Input().Get("id")
+	id := c.Ctx.Input.Query("id")
 	host := c.Ctx.Request.Host
-	providerName := c.Input().Get("providerName")
-	paymentEnv := c.Input().Get("paymentEnv")
+	providerName := c.Ctx.Input.Query("providerName")
+	paymentEnv := c.Ctx.Input.Query("paymentEnv")
+	customPriceStr := c.Ctx.Input.Query("customPrice")
+	if customPriceStr == "" {
+		customPriceStr = "0"
+	}
 
-	// buy `pricingName/planName` for `paidUserName`
-	pricingName := c.Input().Get("pricingName")
-	planName := c.Input().Get("planName")
-	paidUserName := c.Input().Get("userName")
-	owner, _ := util.GetOwnerAndNameFromId(id)
-	userId := util.GetId(owner, paidUserName)
-	if paidUserName == "" {
+	customPrice, err := strconv.ParseFloat(customPriceStr, 64)
+	if err != nil {
+		c.ResponseError(err.Error())
+		return
+	}
+
+	pricingName := c.Ctx.Input.Query("pricingName")
+	planName := c.Ctx.Input.Query("planName")
+	paidUserName := c.Ctx.Input.Query("userName")
+
+	owner, _, err := util.GetOwnerAndNameFromIdWithError(id)
+	if err != nil {
+		c.ResponseError(err.Error())
+		return
+	}
+
+	var userId string
+	if paidUserName != "" {
+		userId = util.GetId(owner, paidUserName)
+		if userId != c.GetSessionUsername() && !c.IsAdminOfOrganization(owner) && userId != c.GetPaidUsername() {
+			c.ResponseError(c.T("general:Only admin user can specify user"))
+			return
+		}
+
+		c.SetSession("paidUsername", "")
+	} else {
 		userId = c.GetSessionUsername()
 	}
 	if userId == "" {
@@ -189,7 +218,9 @@ func (c *ApiController) BuyProduct() {
 		return
 	}
 
-	payment, attachInfo, err := object.BuyProduct(id, user, providerName, pricingName, planName, host, paymentEnv)
+	couponCode := c.Ctx.Input.Query("couponCode")
+
+	payment, attachInfo, err := object.BuyProduct(id, user, providerName, pricingName, planName, host, paymentEnv, customPrice, c.GetAcceptLanguage(), couponCode)
 	if err != nil {
 		c.ResponseError(err.Error())
 		return

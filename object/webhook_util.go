@@ -17,25 +17,57 @@ package object
 import (
 	"io"
 	"net/http"
+	"reflect"
 	"strings"
+	"time"
 
 	"github.com/casdoor/casdoor/util"
-	"github.com/casvisor/casvisor-go-sdk/casvisorsdk"
 )
 
-func sendWebhook(webhook *Webhook, record *casvisorsdk.Record, extendedUser *User) (int, string, error) {
-	client := &http.Client{}
-
-	type RecordEx struct {
-		casvisorsdk.Record
-		ExtendedUser *User `xorm:"-" json:"extendedUser"`
+func sendWebhook(webhook *Webhook, record *Record, extendedUser *User) (int, string, error) {
+	client := &http.Client{Timeout: 30 * time.Second}
+	// only global admins manage the webhooks of "built-in", the ones of other organizations
+	// must not reach the intranet, as their responses are readable by the org admins
+	if webhook.Organization != "built-in" {
+		client = util.NewInternetOnlyHttpClient(30 * time.Second)
 	}
-	recordEx := &RecordEx{
-		Record:       *record,
-		ExtendedUser: extendedUser,
-	}
+	userMap := make(map[string]interface{})
+	var body io.Reader
 
-	body := strings.NewReader(util.StructToJson(recordEx))
+	if webhook.TokenFields != nil && len(webhook.TokenFields) > 0 && extendedUser != nil {
+		userValue := reflect.ValueOf(extendedUser).Elem()
+
+		for _, field := range webhook.TokenFields {
+			userField := userValue.FieldByName(field)
+			if userField.IsValid() {
+				newfield := util.SnakeToCamel(util.CamelToSnakeCase(field))
+				userMap[newfield] = userField.Interface()
+			}
+		}
+
+		type RecordEx struct {
+			Record
+			ExtendedUser map[string]interface{} `json:"extendedUser"`
+		}
+
+		recordEx := &RecordEx{
+			Record:       *record,
+			ExtendedUser: userMap,
+		}
+
+		body = strings.NewReader(util.StructToJson(recordEx))
+	} else {
+		type RecordEx struct {
+			Record
+			ExtendedUser *User `xorm:"-" json:"extendedUser"`
+		}
+		recordEx := &RecordEx{
+			Record:       *record,
+			ExtendedUser: extendedUser,
+		}
+
+		body = strings.NewReader(util.StructToJson(recordEx))
+	}
 
 	req, err := http.NewRequest(webhook.Method, webhook.Url, body)
 	if err != nil {

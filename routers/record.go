@@ -15,47 +15,25 @@
 package routers
 
 import (
+	"encoding/json"
 	"fmt"
 
-	"github.com/beego/beego/context"
+	"github.com/beego/beego/v2/server/web/context"
 	"github.com/casdoor/casdoor/object"
 	"github.com/casdoor/casdoor/util"
-	"github.com/casvisor/casvisor-go-sdk/casvisorsdk"
 )
 
-func getUser(ctx *context.Context) (username string) {
-	defer func() {
-		if r := recover(); r != nil {
-			username = getUserByClientIdSecret(ctx)
-		}
-	}()
-
-	username = ctx.Input.Session("username").(string)
-
-	if username == "" {
-		username = getUserByClientIdSecret(ctx)
+func getUser(ctx *context.Context) string {
+	if username, ok := ctx.Input.Session("username").(string); ok && username != "" {
+		return username
 	}
 
-	return
-}
-
-func getUserByClientIdSecret(ctx *context.Context) string {
-	clientId := ctx.Input.Query("clientId")
-	clientSecret := ctx.Input.Query("clientSecret")
-	if clientId == "" || clientSecret == "" {
-		return ""
-	}
-
-	application, err := object.GetApplicationByClientId(clientId)
+	username, err := getUsernameByClientIdSecret(ctx)
 	if err != nil {
-		panic(err)
-	}
-
-	if application == nil || application.ClientSecret != clientSecret {
 		return ""
 	}
 
-	return util.GetId(application.Organization, application.Name)
+	return username
 }
 
 func RecordMessage(ctx *context.Context) {
@@ -65,7 +43,72 @@ func RecordMessage(ctx *context.Context) {
 
 	userId := getUser(ctx)
 
+	// Special handling for set-password endpoint to capture target user
+	if ctx.Request.URL.Path == "/api/set-password" {
+		// Parse form if not already parsed
+		if err := ctx.Request.ParseForm(); err != nil {
+			fmt.Printf("RecordMessage() error parsing form: %s\n", err.Error())
+		} else {
+			userOwner := ctx.Request.Form.Get("userOwner")
+			userName := ctx.Request.Form.Get("userName")
+
+			if userOwner != "" && userName != "" {
+				targetUserId := util.GetId(userOwner, userName)
+				ctx.Input.SetParam("recordTargetUserId", targetUserId)
+			}
+		}
+	}
+
 	ctx.Input.SetParam("recordUserId", userId)
+}
+
+// getOrganizationFromRequest derives the organization of a request that has no authenticated
+// subject, from the organization or application that the request names.
+func getOrganizationFromRequest(ctx *context.Context) string {
+	var body struct {
+		Organization string `json:"organization"`
+		Application  string `json:"application"`
+		ClientId     string `json:"clientId"`
+	}
+	if len(ctx.Input.RequestBody) != 0 {
+		_ = json.Unmarshal(ctx.Input.RequestBody, &body)
+	}
+
+	// the name is caller-controlled, so a made-up one must not become an owner
+	for _, name := range []string{body.Organization, ctx.Input.Query("organization")} {
+		if name == "" {
+			continue
+		}
+
+		organization, err := object.GetOrganization(util.GetId("admin", name))
+		if err == nil && organization != nil {
+			return organization.Name
+		}
+	}
+
+	applicationId := ctx.Input.Query("applicationId")
+	if body.Application != "" {
+		applicationId = util.GetId("admin", body.Application)
+	}
+	if applicationId != "" {
+		application, err := object.GetApplication(applicationId)
+		if err == nil && application != nil {
+			return application.Organization
+		}
+	}
+
+	clientId := body.ClientId
+	if clientId == "" {
+		clientId = ctx.Input.Query("clientId")
+	}
+	if clientId != "" {
+		application, err := object.GetApplicationByClientId(clientId)
+		if err == nil && application != nil {
+			return application.Organization
+		}
+	}
+
+	return ""
 }
 
 func AfterRecordMessage(ctx *context.Context) {
@@ -76,11 +119,35 @@ func AfterRecordMessage(ctx *context.Context) {
 	}
 
 	userId := ctx.Input.Params()["recordUserId"]
-	if userId != "" {
-		record.Organization, record.User = util.GetOwnerAndNameFromId(userId)
+	targetUserId := ctx.Input.Params()["recordTargetUserId"]
+	detail := ctx.Input.Params()["recordFailureReason"]
+	if detail != "" {
+		record.Detail = detail
 	}
 
-	var record2 *casvisorsdk.Record
+	// For set-password endpoint, use target user if available
+	// We use defensive error handling here (log instead of panic) because target user
+	// parsing is a new feature. If it fails, we gracefully fall back to the regular
+	// userId flow or empty user/org fields, maintaining backward compatibility.
+	if record.Action == "set-password" && targetUserId != "" {
+		owner, user, err := util.GetOwnerAndNameFromIdWithError(targetUserId)
+		if err != nil {
+			fmt.Printf("AfterRecordMessage() error parsing target user %s: %s\n", targetUserId, err.Error())
+		} else {
+			record.Organization, record.User = owner, user
+		}
+	} else if userId != "" {
+		err = record.SetUser(userId)
+		if err != nil {
+			panic(err)
+		}
+	}
+
+	if record.Organization == "" {
+		record.Organization = getOrganizationFromRequest(ctx)
+	}
+
+	var record2 *object.Record
 	recordSignup := ctx.Input.Params()["recordSignup"]
 	if recordSignup == "true" {
 		record2 = object.CopyRecord(record)

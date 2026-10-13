@@ -156,6 +156,7 @@ func (idp *OktaIdProvider) GetToken(code string) (*oauth2.Token, error) {
 
 type OktaUserInfo struct {
 	Email             string `json:"email"`
+	EmailVerified     bool   `json:"email_verified"`
 	Name              string `json:"name"`
 	PreferredUsername string `json:"preferred_username"`
 	Picture           string `json:"picture"`
@@ -183,18 +184,48 @@ func (idp *OktaIdProvider) GetUserInfo(token *oauth2.Token) (*UserInfo, error) {
 		return nil, err
 	}
 
+	// First unmarshal into a map to capture all claims
+	var rawClaims map[string]interface{}
+	err = json.Unmarshal(body, &rawClaims)
+	if err != nil {
+		return nil, err
+	}
+
 	var oktaUserInfo OktaUserInfo
 	err = json.Unmarshal(body, &oktaUserInfo)
 	if err != nil {
 		return nil, err
 	}
 
+	// Convert raw claims to string map for Extra field
+	extra := make(map[string]string)
+	for k, v := range rawClaims {
+		if v != nil {
+			// Convert to string representation
+			switch val := v.(type) {
+			case string:
+				extra[k] = val
+			case float64:
+				extra[k] = fmt.Sprintf("%v", val)
+			case bool:
+				extra[k] = fmt.Sprintf("%v", val)
+			default:
+				// For complex types, marshal to JSON string
+				if jsonVal, err := json.Marshal(val); err == nil {
+					extra[k] = string(jsonVal)
+				}
+			}
+		}
+	}
+
 	userInfo := UserInfo{
-		Id:          oktaUserInfo.Sub,
-		Username:    oktaUserInfo.PreferredUsername,
-		DisplayName: oktaUserInfo.Name,
-		Email:       oktaUserInfo.Email,
-		AvatarUrl:   oktaUserInfo.Picture,
+		Id:            oktaUserInfo.Sub,
+		Username:      oktaUserInfo.PreferredUsername,
+		DisplayName:   oktaUserInfo.Name,
+		Email:         oktaUserInfo.Email,
+		EmailVerified: oktaUserInfo.EmailVerified,
+		AvatarUrl:     oktaUserInfo.Picture,
+		Extra:         extra,
 	}
 	return &userInfo, nil
 }

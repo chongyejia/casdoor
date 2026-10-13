@@ -15,9 +15,12 @@
 package object
 
 import (
+	"errors"
+	"fmt"
 	"sort"
 	"strings"
 
+	"github.com/casdoor/casdoor/i18n"
 	"github.com/casdoor/casdoor/util"
 	"github.com/casdoor/casdoor/xlsx"
 )
@@ -73,77 +76,135 @@ func parseListItem(lines *[]string, i int) []string {
 	return trimmedItems
 }
 
-func UploadUsers(owner string, path string) (bool, error) {
-	table := xlsx.ReadXlsxFile(path)
+func isEmptyLine(line []string) bool {
+	for _, cell := range line {
+		if strings.TrimSpace(cell) != "" {
+			return false
+		}
+	}
+	return true
+}
 
-	oldUserMap, err := getUserMap(owner)
+func UploadUsers(owner string, path string, userObj *User, lang string) (bool, error) {
+	table, err := xlsx.ReadXlsxFile(path)
+	if err != nil {
+		return false, err
+	}
+
+	if len(table) == 0 {
+		return false, errors.New(i18n.Translate(lang, "general:The uploaded file is empty"))
+	}
+
+	for idx, row := range table[0] {
+		splitRow := strings.Split(row, "#")
+		if len(splitRow) > 1 {
+			table[0][idx] = splitRow[1]
+		}
+	}
+
+	parsedUsers, err := StringArrayToStruct[User](table)
+	if err != nil {
+		return false, err
+	}
+
+	// Excel keeps blank rows in the sheet, they would otherwise be imported as users with an empty name
+	uploadedUsers := []*User{}
+	lines := []int{}
+	for idx, user := range parsedUsers {
+		if isEmptyLine(table[idx+1]) {
+			continue
+		}
+
+		uploadedUsers = append(uploadedUsers, user)
+		lines = append(lines, idx+2)
+	}
+	if len(uploadedUsers) == 0 {
+		return false, errors.New(i18n.Translate(lang, "general:The uploaded file contains no user"))
+	}
+
+	organizationName := uploadedUsers[0].Owner
+	if organizationName == "" || !userObj.IsGlobalAdmin() {
+		organizationName = owner
+	}
+
+	organization, err := getOrganization("admin", organizationName)
+	if err != nil {
+		return false, err
+	}
+	if organization == nil {
+		return false, fmt.Errorf(i18n.Translate(lang, "auth:The organization: %s does not exist"), organizationName)
+	}
+
+	oldUserMap, err := getUserMap(organizationName)
 	if err != nil {
 		return false, err
 	}
 
 	newUsers := []*User{}
-	for index, line := range table {
-		line := line
-		if index == 0 || parseLineItem(&line, 0) == "" {
+	existingNames := []string{}
+	uploadedLineMap := map[string]int{}
+	for idx, user := range uploadedUsers {
+		line := lines[idx]
+
+		user.Owner = organizationName
+		user.Name = strings.TrimSpace(user.Name)
+		if user.Name == "" {
+			return false, fmt.Errorf(i18n.Translate(lang, "general:The user name in line %d is empty"), line)
+		}
+		if oldLine, ok := uploadedLineMap[user.Name]; ok {
+			return false, fmt.Errorf(i18n.Translate(lang, "general:The user: %s in line %d is duplicated with line %d"), user.Name, line, oldLine)
+		}
+		uploadedLineMap[user.Name] = line
+
+		if _, ok := oldUserMap[user.GetId()]; ok {
+			existingNames = append(existingNames, user.Name)
 			continue
 		}
 
-		user := &User{
-			Owner:             parseLineItem(&line, 0),
-			Name:              parseLineItem(&line, 1),
-			CreatedTime:       parseLineItem(&line, 2),
-			UpdatedTime:       parseLineItem(&line, 3),
-			Id:                parseLineItem(&line, 4),
-			Type:              parseLineItem(&line, 5),
-			Password:          parseLineItem(&line, 6),
-			PasswordSalt:      parseLineItem(&line, 7),
-			DisplayName:       parseLineItem(&line, 8),
-			FirstName:         parseLineItem(&line, 9),
-			LastName:          parseLineItem(&line, 10),
-			Avatar:            parseLineItem(&line, 11),
-			PermanentAvatar:   "",
-			Email:             parseLineItem(&line, 12),
-			Phone:             parseLineItem(&line, 13),
-			Location:          parseLineItem(&line, 14),
-			Address:           []string{parseLineItem(&line, 15)},
-			Affiliation:       parseLineItem(&line, 16),
-			Title:             parseLineItem(&line, 17),
-			IdCardType:        parseLineItem(&line, 18),
-			IdCard:            parseLineItem(&line, 19),
-			Homepage:          parseLineItem(&line, 20),
-			Bio:               parseLineItem(&line, 21),
-			Tag:               parseLineItem(&line, 22),
-			Region:            parseLineItem(&line, 23),
-			Language:          parseLineItem(&line, 24),
-			Gender:            parseLineItem(&line, 25),
-			Birthday:          parseLineItem(&line, 26),
-			Education:         parseLineItem(&line, 27),
-			Score:             parseLineItemInt(&line, 28),
-			Karma:             parseLineItemInt(&line, 29),
-			Ranking:           parseLineItemInt(&line, 30),
-			IsDefaultAvatar:   false,
-			IsOnline:          parseLineItemBool(&line, 31),
-			IsAdmin:           parseLineItemBool(&line, 32),
-			IsForbidden:       parseLineItemBool(&line, 33),
-			IsDeleted:         parseLineItemBool(&line, 34),
-			SignupApplication: parseLineItem(&line, 35),
-			Hash:              "",
-			PreHash:           "",
-			CreatedIp:         parseLineItem(&line, 36),
-			LastSigninTime:    parseLineItem(&line, 37),
-			LastSigninIp:      parseLineItem(&line, 38),
-			Ldap:              "",
-			Properties:        map[string]string{},
-			DeletedTime:       parseLineItem(&line, 39),
+		if user.CreatedTime == "" {
+			user.CreatedTime = util.GetCurrentTime()
+		}
+		if user.Id == "" {
+			user.Id = util.GenerateId()
+		}
+		if user.Type == "" {
+			user.Type = "normal-user"
+		}
+		user.PasswordType = "plain"
+		if user.DisplayName == "" {
+			user.DisplayName = user.Name
+		}
+		user.Avatar = organization.DefaultAvatar
+		if user.Region == "" {
+			user.Region = userObj.Region
+		}
+		if user.Address == nil {
+			user.Address = []string{}
+		}
+		if user.CountryCode == "" {
+			user.CountryCode = userObj.CountryCode
+		}
+		if user.SignupApplication == "" {
+			user.SignupApplication = organization.DefaultApplication
+		}
+		if user.RegisterType == "" {
+			user.RegisterType = "Upload Users"
+		}
+		if user.RegisterSource == "" {
+			user.RegisterSource = userObj.GetId()
+		}
+		if msg := checkUserGroups(&User{}, user, lang); msg != "" {
+			return false, fmt.Errorf("%s: line %d", msg, line)
 		}
 
-		if _, ok := oldUserMap[user.GetId()]; !ok {
-			newUsers = append(newUsers, user)
-		}
+		newUsers = append(newUsers, user)
 	}
 
 	if len(newUsers) == 0 {
-		return false, nil
+		if len(existingNames) > 10 {
+			existingNames = append(existingNames[:10], "...")
+		}
+		return false, fmt.Errorf(i18n.Translate(lang, "general:The users already exist: %s"), strings.Join(existingNames, ", "))
 	}
 
 	return AddUsersInBatch(newUsers)

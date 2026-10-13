@@ -24,6 +24,12 @@ const (
 	PaymentStateError    PaymentState = "Error"
 )
 
+// IsTerminalState checks if a payment state is terminal (cannot transition to other states)
+func IsTerminalState(state PaymentState) bool {
+	return state == PaymentStatePaid || state == PaymentStateError ||
+		state == PaymentStateCanceled || state == PaymentStateTimeout
+}
+
 const (
 	PaymentEnvWechatBrowser = "WechatBrowser"
 )
@@ -33,8 +39,11 @@ type PayReq struct {
 	ProductName        string
 	PayerName          string
 	PayerId            string
+	PayerEmail         string
 	PaymentName        string
 	ProductDisplayName string
+	ProductDescription string
+	ProductImage       string
 	Price              float64
 	Currency           string
 

@@ -18,8 +18,8 @@ import (
 	"context"
 	"strings"
 
-	"github.com/casdoor/notify"
-	"github.com/casdoor/notify/service/googlechat"
+	notify "github.com/casdoor/notify2"
+	"github.com/casdoor/notify2/service/googlechat"
 	"google.golang.org/api/chat/v1"
 	"google.golang.org/api/option"
 )
@@ -29,6 +29,10 @@ func NewGoogleChatProvider(credentials string) (*notify.Notify, error) {
 	withSpacesScope := option.WithScopes("https://www.googleapis.com/auth/chat.spaces")
 
 	listSvc, err := chat.NewService(context.Background(), withCred, withSpacesScope)
+	if err != nil {
+		return nil, err
+	}
+
 	spaces, err := listSvc.Spaces.List().Do()
 	if err != nil {
 		return nil, err

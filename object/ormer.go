@@ -23,51 +23,76 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/casvisor/casvisor-go-sdk/casvisorsdk"
-
-	"github.com/beego/beego"
+	"github.com/beego/beego/v2/server/web"
 	"github.com/casdoor/casdoor/conf"
 	"github.com/casdoor/casdoor/util"
 	xormadapter "github.com/casdoor/xorm-adapter/v3"
-	_ "github.com/denisenkom/go-mssqldb" // db = mssql
-	_ "github.com/go-sql-driver/mysql"   // db = mysql
-	_ "github.com/lib/pq"                // db = postgres
+	_ "github.com/go-sql-driver/mysql"  // db = mysql
+	_ "github.com/lib/pq"               // db = postgres
+	_ "github.com/microsoft/go-mssqldb" // db = mssql
 	"github.com/xorm-io/xorm"
 	"github.com/xorm-io/xorm/core"
 	"github.com/xorm-io/xorm/names"
 	_ "modernc.org/sqlite" // db = sqlite
 )
 
+const (
+	defaultConfigPath     = "conf/app.conf"
+	defaultExportFilePath = "init_data_dump.json"
+)
+
 var (
 	ormer          *Ormer = nil
 	createDatabase        = true
-	configPath            = "conf/app.conf"
+	configPath            = defaultConfigPath
+	exportData            = false
+	exportFilePath        = defaultExportFilePath
 )
 
 func InitFlag() {
-	createDatabase = getCreateDatabaseFlag()
-	configPath = getConfigFlag()
+	createDatabasePtr := flag.Bool("createDatabase", false, "true if you need to create database")
+	configPathPtr := flag.String("config", defaultConfigPath, "set it to \"/your/path/app.conf\" if your config file is not in: \"/conf/app.conf\"")
+	exportDataPtr := flag.Bool("export", false, "export database to JSON file and exit (use -exportPath to specify custom location)")
+	exportFilePathPtr := flag.String("exportPath", defaultExportFilePath, "path to the exported data file (used with -export)")
+	startupModePtr := flag.String("startupMode", "", "explicit migration-only or serve-without-ddl; empty retains legacy startup")
+	startupManifestPtr := flag.String("startupManifest", "", "approved non-secret startup manifest")
+	startupManifestSHA256Ptr := flag.String("startupManifestSHA256", "", "exact approved manifest checksum")
+	startupAttemptPtr := flag.String("startupAttempt", "", "approved persisted migration attempt identifier")
+	startupAttemptDirectoryPtr := flag.String("startupAttemptDirectory", "", "preexisting protected persistent attempt directory")
+	flag.Parse()
+
+	createDatabase = *createDatabasePtr
+	configPath = *configPathPtr
+	exportData = *exportDataPtr
+	exportFilePath = *exportFilePathPtr
+	startupMode = *startupModePtr
+	startupManifestPath = *startupManifestPtr
+	startupManifestSHA256 = *startupManifestSHA256Ptr
+	startupAttemptID = *startupAttemptPtr
+	startupAttemptDirectory = *startupAttemptDirectoryPtr
+
+	// Load beego config from the specified config path
+	err := web.LoadAppConfig("ini", configPath)
+	if err != nil {
+		panic(fmt.Sprintf("failed to load config from %s: %v", configPath, err))
+	}
 }
 
-func getCreateDatabaseFlag() bool {
-	res := flag.Bool("createDatabase", false, "true if you need to create database")
-	flag.Parse()
-	return *res
+func ShouldExportData() bool {
+	return exportData
 }
 
-func getConfigFlag() string {
-	res := flag.String("config", "conf/app.conf", "set it to \"/your/path/app.conf\" if your config file is not in: \"/conf/app.conf\"")
-	flag.Parse()
-	return *res
+func GetExportFilePath() string {
+	return exportFilePath
 }
 
 func InitConfig() {
-	err := beego.LoadAppConfig("ini", "../conf/app.conf")
+	err := web.LoadAppConfig("ini", "../conf/app.conf")
 	if err != nil {
 		panic(err)
 	}
 
-	beego.BConfig.WebConfig.Session.SessionOn = true
+	web.BConfig.WebConfig.Session.SessionOn = true
 
 	InitAdapter()
 	CreateTables()
@@ -104,6 +129,9 @@ func InitAdapter() {
 }
 
 func CreateTables() {
+	if StartupServeWithoutDDL() {
+		panic("schema synchronization forbidden in serve-without-ddl")
+	}
 	if createDatabase {
 		err := ormer.CreateDatabase()
 		if err != nil {
@@ -125,16 +153,20 @@ type Ormer struct {
 
 // finalizer is the destructor for Ormer.
 func finalizer(a *Ormer) {
-	err := a.Engine.Close()
-	if err != nil {
-		panic(err)
-	}
-
-	if a.Db != nil {
-		err = a.Db.Close()
+	if a.Engine != nil {
+		err := a.Engine.Close()
 		if err != nil {
 			panic(err)
 		}
+		a.Engine = nil
+	}
+
+	if a.Db != nil {
+		err := a.Db.Close()
+		if err != nil {
+			panic(err)
+		}
+		a.Db = nil
 	}
 }
 
@@ -157,7 +189,7 @@ func NewAdapter(driverName string, dataSourceName string, dbName string) (*Ormer
 	return a, nil
 }
 
-// NewAdapterFromdb is the constructor for Ormer.
+// NewAdapterFromDb is the constructor for Ormer.
 func NewAdapterFromDb(driverName string, dataSourceName string, dbName string, db *sql.DB) (*Ormer, error) {
 	a := &Ormer{}
 	a.driverName = driverName
@@ -179,7 +211,7 @@ func NewAdapterFromDb(driverName string, dataSourceName string, dbName string, d
 
 func refineDataSourceNameForPostgres(dataSourceName string) string {
 	reg := regexp.MustCompile(`dbname=[^ ]+\s*`)
-	return reg.ReplaceAllString(dataSourceName, "")
+	return reg.ReplaceAllString(dataSourceName, "dbname=postgres")
 }
 
 func createDatabaseForPostgres(driverName string, dataSourceName string, dbName string) error {
@@ -190,7 +222,7 @@ func createDatabaseForPostgres(driverName string, dataSourceName string, dbName 
 		}
 		defer db.Close()
 
-		_, err = db.Exec(fmt.Sprintf("CREATE DATABASE %s;", dbName))
+		_, err = db.Exec(fmt.Sprintf("CREATE DATABASE \"%s\";", dbName))
 		if err != nil {
 			if !strings.Contains(err.Error(), "already exists") {
 				return err
@@ -219,6 +251,16 @@ func createDatabaseForPostgres(driverName string, dataSourceName string, dbName 
 }
 
 func (a *Ormer) CreateDatabase() error {
+	if StartupServeWithoutDDL() {
+		return fmt.Errorf("database creation forbidden in serve-without-ddl")
+	}
+	enabled, _, _, err := migrationLockOptions(a.driverName)
+	if err != nil {
+		return err
+	}
+	if enabled {
+		return fmt.Errorf("migration lock mode requires a pre-existing database")
+	}
 	if a.driverName == "postgres" {
 		return nil
 	}
@@ -233,21 +275,51 @@ func (a *Ormer) CreateDatabase() error {
 	return err
 }
 
-func (a *Ormer) open() error {
-	dataSourceName := a.dataSourceName + a.dbName
-	if a.driverName != "mysql" {
-		dataSourceName = a.dataSourceName
+func setPostgresSchema(engine *xorm.Engine, dataSourceName string) error {
+	schema := util.GetValueFromDataSourceName("search_path", dataSourceName)
+	if schema != "" {
+		engine.SetSchema(schema)
+		return nil
 	}
 
-	engine, err := xorm.NewEngine(a.driverName, dataSourceName)
+	// xorm assumes "public" otherwise, but CREATE TABLE follows the connection's search_path
+	results, err := engine.Query("SELECT current_schema() AS schema")
+	if err != nil {
+		return err
+	}
+	if len(results) == 0 {
+		return nil
+	}
+
+	schema = string(results[0]["schema"])
+	if schema != "" && schema != "public" {
+		engine.SetSchema(schema)
+	}
+	return nil
+}
+
+func (a *Ormer) open() error {
+	dataSourceName, err := migrationDataSourceName(a.driverName, a.dataSourceName, a.dbName, a.driverName == "mysql")
+	if err != nil {
+		return err
+	}
+
+	driverName := a.driverName
+	if driverName == "sqlite3" {
+		driverName = "sqlite"
+	}
+	if err := validateControlledDatabaseTarget(driverName, dataSourceName); err != nil {
+		return err
+	}
+	engine, err := xorm.NewEngine(driverName, dataSourceName)
 	if err != nil {
 		return err
 	}
 
 	if a.driverName == "postgres" {
-		schema := util.GetValueFromDataSourceName("search_path", dataSourceName)
-		if schema != "" {
-			engine.SetSchema(schema)
+		err = setPostgresSchema(engine, dataSourceName)
+		if err != nil {
+			return err
 		}
 	}
 
@@ -256,6 +328,13 @@ func (a *Ormer) open() error {
 }
 
 func (a *Ormer) openFromDb(db *sql.DB) error {
+	enabled, _, _, err := migrationLockOptions(a.driverName)
+	if err != nil {
+		return err
+	}
+	if enabled {
+		return fmt.Errorf("migration lock mode rejects an externally opened connection pool")
+	}
 	dataSourceName := a.dataSourceName + a.dbName
 	if a.driverName != "mysql" {
 		dataSourceName = a.dataSourceName
@@ -263,15 +342,19 @@ func (a *Ormer) openFromDb(db *sql.DB) error {
 
 	xormDb := core.FromDB(db)
 
-	engine, err := xorm.NewEngineWithDB(a.driverName, dataSourceName, xormDb)
+	driverName := a.driverName
+	if driverName == "sqlite3" {
+		driverName = "sqlite"
+	}
+	engine, err := xorm.NewEngineWithDB(driverName, dataSourceName, xormDb)
 	if err != nil {
 		return err
 	}
 
 	if a.driverName == "postgres" {
-		schema := util.GetValueFromDataSourceName("search_path", dataSourceName)
-		if schema != "" {
-			engine.SetSchema(schema)
+		err = setPostgresSchema(engine, dataSourceName)
+		if err != nil {
+			return err
 		}
 	}
 
@@ -280,11 +363,14 @@ func (a *Ormer) openFromDb(db *sql.DB) error {
 }
 
 func (a *Ormer) close() {
-	_ = a.Engine.Close()
-	a.Engine = nil
+	runtime.SetFinalizer(a, nil)
+	finalizer(a)
 }
 
 func (a *Ormer) createTable() {
+	if StartupServeWithoutDDL() {
+		panic("schema synchronization forbidden in serve-without-ddl")
+	}
 	showSql := conf.GetConfigBool("showSql")
 	a.Engine.ShowSQL(showSql)
 
@@ -324,6 +410,11 @@ func (a *Ormer) createTable() {
 	}
 
 	err = a.Engine.Sync2(new(Cert))
+	if err != nil {
+		panic(err)
+	}
+
+	err = a.Engine.Sync2(new(Key))
 	if err != nil {
 		panic(err)
 	}
@@ -373,6 +464,11 @@ func (a *Ormer) createTable() {
 		panic(err)
 	}
 
+	err = a.Engine.Sync2(new(Order))
+	if err != nil {
+		panic(err)
+	}
+
 	err = a.Engine.Sync2(new(Plan))
 	if err != nil {
 		panic(err)
@@ -393,12 +489,22 @@ func (a *Ormer) createTable() {
 		panic(err)
 	}
 
+	err = a.Engine.Sync2(new(Coupon))
+	if err != nil {
+		panic(err)
+	}
+
+	err = a.Engine.Sync2(new(CouponUsage))
+	if err != nil {
+		panic(err)
+	}
+
 	err = a.Engine.Sync2(new(Syncer))
 	if err != nil {
 		panic(err)
 	}
 
-	err = a.Engine.Sync2(new(casvisorsdk.Record))
+	err = a.Engine.Sync2(new(Record))
 	if err != nil {
 		panic(err)
 	}
@@ -408,7 +514,17 @@ func (a *Ormer) createTable() {
 		panic(err)
 	}
 
+	err = a.Engine.Sync2(new(WebhookEvent))
+	if err != nil {
+		panic(err)
+	}
+
 	err = a.Engine.Sync2(new(VerificationRecord))
+	if err != nil {
+		panic(err)
+	}
+
+	err = a.Engine.Sync2(new(MagicLink))
 	if err != nil {
 		panic(err)
 	}
@@ -424,6 +540,56 @@ func (a *Ormer) createTable() {
 	}
 
 	err = a.Engine.Sync2(new(xormadapter.CasbinRule))
+	if err != nil {
+		panic(err)
+	}
+
+	err = a.Engine.Sync2(new(Form))
+	if err != nil {
+		panic(err)
+	}
+
+	err = a.Engine.Sync2(new(Ticket))
+	if err != nil {
+		panic(err)
+	}
+
+	err = a.Engine.Sync2(new(Agent))
+	if err != nil {
+		panic(err)
+	}
+
+	err = a.Engine.Sync2(new(Server))
+	if err != nil {
+		panic(err)
+	}
+
+	err = a.Engine.Sync2(new(Entry))
+	if err != nil {
+		panic(err)
+	}
+
+	err = a.Engine.Sync2(new(Site))
+	if err != nil {
+		panic(err)
+	}
+
+	err = a.Engine.Sync2(new(Rule))
+	if err != nil {
+		panic(err)
+	}
+
+	err = a.Engine.Sync2(new(ThirdPartyLink))
+	if err != nil {
+		panic(err)
+	}
+
+	err = a.Engine.Sync2(new(PasswordHistory))
+	if err != nil {
+		panic(err)
+	}
+
+	err = a.Engine.Sync2(new(SamlSession))
 	if err != nil {
 		panic(err)
 	}

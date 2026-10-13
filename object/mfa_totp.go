@@ -33,12 +33,11 @@ type TotpMfa struct {
 	digits     otp.Digits
 }
 
-func (mfa *TotpMfa) Initiate(userId string) (*MfaProps, error) {
-	//issuer := beego.AppConfig.String("appname")
-	//if issuer == "" {
-	//	issuer = "casdoor"
-	//}
-	issuer := "Casdoor"
+func (mfa *TotpMfa) Initiate(userId string, issuer string) (*MfaProps, error) {
+	// Use the provided issuer (application display name), or fall back to "Casdoor" if not provided
+	if issuer == "" {
+		issuer = "Casdoor"
+	}
 
 	key, err := totp.Generate(totp.GenerateOpts{
 		Issuer:      issuer,
@@ -59,7 +58,7 @@ func (mfa *TotpMfa) Initiate(userId string) (*MfaProps, error) {
 	return &mfaProps, nil
 }
 
-func (mfa *TotpMfa) SetupVerify(passcode string) error {
+func (mfa *TotpMfa) SetupVerify(passcode string, lang string) error {
 	result, err := totp.ValidateCustom(passcode, mfa.Secret, time.Now().UTC(), totp.ValidateOpts{
 		Period:    MfaTotpPeriodInSeconds,
 		Skew:      1,
@@ -94,7 +93,11 @@ func (mfa *TotpMfa) Enable(user *User) error {
 	return nil
 }
 
-func (mfa *TotpMfa) Verify(passcode string) error {
+func (mfa *TotpMfa) Verify(passcode string, lang string) error {
+	if mfa.Secret == "" {
+		return errors.New("totp is not enabled")
+	}
+
 	result, err := totp.ValidateCustom(passcode, mfa.Secret, time.Now().UTC(), totp.ValidateOpts{
 		Period:    MfaTotpPeriodInSeconds,
 		Skew:      1,

@@ -40,8 +40,23 @@ func saveFile(path string, file *multipart.File) (err error) {
 }
 
 func (c *ApiController) UploadUsers() {
+	if !c.IsAdmin() {
+		c.ResponseError(c.T("auth:Unauthorized operation"))
+		return
+	}
+
+	userObj := c.getCurrentUser()
+	if userObj == nil {
+		c.ResponseError(c.T("auth:Unauthorized operation"))
+		return
+	}
+
 	userId := c.GetSessionUsername()
-	owner, user := util.GetOwnerAndNameFromId(userId)
+	owner, user, err := util.GetOwnerAndNameFromIdWithError(userId)
+	if err != nil {
+		c.ResponseError(err.Error())
+		return
+	}
 
 	file, header, err := c.Ctx.Request.FormFile("file")
 	if err != nil {
@@ -58,7 +73,7 @@ func (c *ApiController) UploadUsers() {
 		return
 	}
 
-	affected, err := object.UploadUsers(owner, path)
+	affected, err := object.UploadUsers(owner, path, userObj, c.GetAcceptLanguage())
 	if err != nil {
 		c.ResponseError(err.Error())
 		return
@@ -67,6 +82,6 @@ func (c *ApiController) UploadUsers() {
 	if affected {
 		c.ResponseOk()
 	} else {
-		c.ResponseError(c.T("user_upload:Failed to import users"))
+		c.ResponseError(c.T("general:Failed to import users"))
 	}
 }

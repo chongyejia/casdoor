@@ -16,6 +16,7 @@ package controllers
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/casdoor/casdoor/object"
 	"github.com/casdoor/casdoor/util"
@@ -27,14 +28,27 @@ type LdapResp struct {
 	ExistUuids []string          `json:"existUuids"`
 }
 
-//type LdapRespGroup struct {
+// type LdapRespGroup struct {
 //	GroupId   string
 //	GroupName string
-//}
+// }
 
 type LdapSyncResp struct {
 	Exist  []object.LdapUser `json:"exist"`
 	Failed []object.LdapUser `json:"failed"`
+}
+
+func (c *ApiController) requireLdapOfOwner(owner string, ldapId string) bool {
+	ldap, err := object.GetLdapOfOwner(owner, ldapId)
+	if err != nil {
+		c.ResponseError(err.Error())
+		return false
+	}
+	if ldap == nil {
+		c.ResponseError(fmt.Sprintf(c.T("general:The LDAP: %s does not exist"), ldapId))
+		return false
+	}
+	return true
 }
 
 // GetLdapUsers
@@ -45,12 +59,20 @@ type LdapSyncResp struct {
 // @Success 200 {object} controllers.LdapResp The Response object
 // @router /get-ldap-users [get]
 func (c *ApiController) GetLdapUsers() {
-	id := c.Input().Get("id")
+	id := c.Ctx.Input.Query("id")
 
-	_, ldapId := util.GetOwnerAndNameFromId(id)
-	ldapServer, err := object.GetLdap(ldapId)
+	owner, ldapId, err := util.GetOwnerAndNameFromIdWithError(id)
 	if err != nil {
 		c.ResponseError(err.Error())
+		return
+	}
+	ldapServer, err := object.GetLdapOfOwner(owner, ldapId)
+	if err != nil {
+		c.ResponseError(err.Error())
+		return
+	}
+	if ldapServer == nil {
+		c.ResponseError(fmt.Sprintf(c.T("general:The LDAP: %s does not exist"), ldapId))
 		return
 	}
 
@@ -61,18 +83,18 @@ func (c *ApiController) GetLdapUsers() {
 	}
 	defer conn.Close()
 
-	//groupsMap, err := conn.GetLdapGroups(ldapServer.BaseDn)
-	//if err != nil {
+	// groupsMap, err := conn.GetLdapGroups(ldapServer.BaseDn)
+	// if err != nil {
 	//  c.ResponseError(err.Error())
 	//	return
-	//}
+	// }
 
-	//for _, group := range groupsMap {
+	// for _, group := range groupsMap {
 	//	resp.Groups = append(resp.Groups, LdapRespGroup{
 	//		GroupId:   group.GidNumber,
 	//		GroupName: group.Cn,
 	//	})
-	//}
+	// }
 
 	users, err := conn.GetLdapUsers(ldapServer)
 	if err != nil {
@@ -105,7 +127,7 @@ func (c *ApiController) GetLdapUsers() {
 // @Success 200 {array} object.Ldap The Response object
 // @router /get-ldaps [get]
 func (c *ApiController) GetLdaps() {
-	owner := c.Input().Get("owner")
+	owner := c.Ctx.Input.Query("owner")
 
 	c.ResponseOk(object.GetMaskedLdaps(object.GetLdaps(owner)))
 }
@@ -118,15 +140,19 @@ func (c *ApiController) GetLdaps() {
 // @Success 200 {object} object.Ldap The Response object
 // @router /get-ldap [get]
 func (c *ApiController) GetLdap() {
-	id := c.Input().Get("id")
+	id := c.Ctx.Input.Query("id")
 
 	if util.IsStringsEmpty(id) {
 		c.ResponseError(c.T("general:Missing parameter"))
 		return
 	}
 
-	_, name := util.GetOwnerAndNameFromId(id)
-	ldap, err := object.GetLdap(name)
+	owner, name, err := util.GetOwnerAndNameFromIdWithError(id)
+	if err != nil {
+		c.ResponseError(err.Error())
+		return
+	}
+	ldap, err := object.GetLdapOfOwner(owner, name)
 	if err != nil {
 		c.ResponseError(err.Error())
 		return
@@ -151,6 +177,16 @@ func (c *ApiController) AddLdap() {
 
 	if util.IsStringsEmpty(ldap.Owner, ldap.ServerName, ldap.Host, ldap.Username, ldap.Password, ldap.BaseDn) {
 		c.ResponseError(c.T("general:Missing parameter"))
+		return
+	}
+
+	organization, err := object.GetOrganization(util.GetId("admin", ldap.Owner))
+	if err != nil {
+		c.ResponseError(err.Error())
+		return
+	}
+	if organization == nil {
+		c.ResponseError(fmt.Sprintf(c.T("auth:The organization: %s does not exist"), ldap.Owner))
 		return
 	}
 
@@ -187,14 +223,18 @@ func (c *ApiController) AddLdap() {
 func (c *ApiController) UpdateLdap() {
 	var ldap object.Ldap
 	err := json.Unmarshal(c.Ctx.Input.RequestBody, &ldap)
-	if err != nil || util.IsStringsEmpty(ldap.Owner, ldap.ServerName, ldap.Host, ldap.Username, ldap.Password, ldap.BaseDn) {
+	if err != nil || util.IsStringsEmpty(ldap.Id, ldap.Owner, ldap.ServerName, ldap.Host, ldap.Username, ldap.Password, ldap.BaseDn) {
 		c.ResponseError(c.T("general:Missing parameter"))
 		return
 	}
 
-	prevLdap, err := object.GetLdap(ldap.Id)
+	prevLdap, err := object.GetLdapOfOwner(ldap.Owner, ldap.Id)
 	if err != nil {
 		c.ResponseError(err.Error())
+		return
+	}
+	if prevLdap == nil {
+		c.ResponseError(c.T("general:The object does not exist"))
 		return
 	}
 
@@ -233,6 +273,10 @@ func (c *ApiController) DeleteLdap() {
 		return
 	}
 
+	if !c.requireLdapOfOwner(ldap.Owner, ldap.Id) {
+		return
+	}
+
 	affected, err := object.DeleteLdap(&ldap)
 	if err != nil {
 		c.ResponseError(err.Error())
@@ -253,11 +297,19 @@ func (c *ApiController) DeleteLdap() {
 // @Success 200 {object} controllers.LdapSyncResp The Response object
 // @router /sync-ldap-users [post]
 func (c *ApiController) SyncLdapUsers() {
-	id := c.Input().Get("id")
+	id := c.Ctx.Input.Query("id")
 
-	owner, ldapId := util.GetOwnerAndNameFromId(id)
+	owner, ldapId, err := util.GetOwnerAndNameFromIdWithError(id)
+	if err != nil {
+		c.ResponseError(err.Error())
+		return
+	}
+	if !c.requireLdapOfOwner(owner, ldapId) {
+		return
+	}
+
 	var users []object.LdapUser
-	err := json.Unmarshal(c.Ctx.Input.RequestBody, &users)
+	err = json.Unmarshal(c.Ctx.Input.RequestBody, &users)
 	if err != nil {
 		c.ResponseError(err.Error())
 		return
@@ -269,7 +321,11 @@ func (c *ApiController) SyncLdapUsers() {
 		return
 	}
 
-	exist, failed, _ := object.SyncLdapUsers(owner, users, ldapId)
+	exist, failed, err := object.SyncLdapUsers(owner, users, ldapId, c.GetAcceptLanguage())
+	if err != nil {
+		c.ResponseError(err.Error())
+		return
+	}
 
 	c.ResponseOk(&LdapSyncResp{
 		Exist:  exist,

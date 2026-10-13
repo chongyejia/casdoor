@@ -15,6 +15,8 @@
 package email
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -24,33 +26,95 @@ import (
 )
 
 type HttpEmailProvider struct {
-	endpoint string
-	method   string
+	endpoint    string
+	method      string
+	httpHeaders map[string]string
+	bodyMapping map[string]string
+	contentType string
+	httpClient  *http.Client
 }
 
-func NewHttpEmailProvider(endpoint string, method string) *HttpEmailProvider {
+func NewHttpEmailProvider(endpoint string, method string, httpHeaders map[string]string, bodyMapping map[string]string, contentType string) *HttpEmailProvider {
+	if contentType == "" {
+		contentType = "application/x-www-form-urlencoded"
+	}
+
 	client := &HttpEmailProvider{
-		endpoint: endpoint,
-		method:   method,
+		endpoint:    endpoint,
+		method:      method,
+		httpHeaders: httpHeaders,
+		bodyMapping: bodyMapping,
+		contentType: contentType,
 	}
 	return client
 }
 
-func (c *HttpEmailProvider) Send(fromAddress string, fromName string, toAddress string, subject string, content string) error {
+// SetHttpClient replaces the default client, nil keeps it
+func (c *HttpEmailProvider) SetHttpClient(httpClient *http.Client) {
+	c.httpClient = httpClient
+}
+
+func (c *HttpEmailProvider) Send(fromAddress string, fromName string, toAddress []string, subject string, content string) error {
 	var req *http.Request
 	var err error
-	if c.method == "POST" {
-		formValues := url.Values{}
-		formValues.Set("fromName", fromName)
-		formValues.Set("toAddress", toAddress)
-		formValues.Set("subject", subject)
-		formValues.Set("content", content)
-		req, err = http.NewRequest(c.method, c.endpoint, strings.NewReader(formValues.Encode()))
+
+	fromAddressField := "fromAddress"
+	fromNameField := "fromName"
+	toAddressField := "toAddress"
+	toAddressesField := "toAddresses"
+	subjectField := "subject"
+	contentField := "content"
+	for k, v := range c.bodyMapping {
+		switch k {
+		case "fromAddress":
+			fromAddressField = v
+		case "fromName":
+			fromNameField = v
+		case "toAddress":
+			toAddressField = v
+		case "toAddresses":
+			toAddressesField = v
+		case "subject":
+			subjectField = v
+		case "content":
+			contentField = v
+		}
+	}
+
+	if c.method == "POST" || c.method == "PUT" || c.method == "DELETE" {
+		bodyMap := make(map[string]string)
+		bodyMap[fromAddressField] = fromAddress
+		bodyMap[fromNameField] = fromName
+		bodyMap[subjectField] = subject
+		bodyMap[contentField] = content
+
+		var fromValueBytes []byte
+		if c.contentType == "application/json" {
+			fromValueBytes, err = json.Marshal(bodyMap)
+			if err != nil {
+				return err
+			}
+			req, err = http.NewRequest(c.method, c.endpoint, bytes.NewBuffer(fromValueBytes))
+		} else {
+			formValues := url.Values{}
+			for k, v := range bodyMap {
+				formValues.Add(k, v)
+			}
+			if len(toAddress) == 1 {
+				formValues.Add(toAddressField, toAddress[0])
+			} else {
+				for _, addr := range toAddress {
+					formValues.Add(toAddressesField, addr)
+				}
+			}
+			req, err = http.NewRequest(c.method, c.endpoint, strings.NewReader(formValues.Encode()))
+		}
+
 		if err != nil {
 			return err
 		}
 
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Content-Type", c.contentType)
 	} else if c.method == "GET" {
 		req, err = http.NewRequest(c.method, c.endpoint, nil)
 		if err != nil {
@@ -58,16 +122,30 @@ func (c *HttpEmailProvider) Send(fromAddress string, fromName string, toAddress 
 		}
 
 		q := req.URL.Query()
-		q.Add("fromName", fromName)
-		q.Add("toAddress", toAddress)
-		q.Add("subject", subject)
-		q.Add("content", content)
+		q.Add(fromAddressField, fromAddress)
+		q.Add(fromNameField, fromName)
+		if len(toAddress) == 1 {
+			q.Add(toAddressField, toAddress[0])
+		} else {
+			for _, addr := range toAddress {
+				q.Add(toAddressesField, addr)
+			}
+		}
+		q.Add(subjectField, subject)
+		q.Add(contentField, content)
 		req.URL.RawQuery = q.Encode()
 	} else {
 		return fmt.Errorf("HttpEmailProvider's Send() error, unsupported method: %s", c.method)
 	}
 
+	for k, v := range c.httpHeaders {
+		req.Header.Set(k, v)
+	}
+
 	httpClient := proxy.DefaultHttpClient
+	if c.httpClient != nil {
+		httpClient = c.httpClient
+	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err

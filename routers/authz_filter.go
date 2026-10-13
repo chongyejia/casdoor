@@ -15,141 +15,414 @@
 package routers
 
 import (
+	stdcontext "context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
+	"time"
 
+	"github.com/beego/beego/v2/core/logs"
+	"github.com/casdoor/casdoor/conf"
+	"github.com/casdoor/casdoor/controllers"
 	"github.com/casdoor/casdoor/object"
 
-	"github.com/beego/beego/context"
+	"github.com/beego/beego/v2/server/web/context"
 	"github.com/casdoor/casdoor/authz"
 	"github.com/casdoor/casdoor/util"
 )
 
+var orgOwnerObject = []string{
+	"-organization",
+	"-syncer",
+	"-webhook",
+	"-application",
+	"-token",
+}
+
+// organizationParamObject lists the APIs whose controllers scope the returned or
+// modified objects by the "organization" query param, which makes that param the
+// object to authorize against.
+var organizationParamObject = []string{
+	"/api/get-applications",
+	"/api/get-organization-applications",
+	"/api/get-syncers",
+	"/api/get-syncer",
+	"/api/run-syncer",
+	"/api/get-tokens",
+	"/api/get-token",
+	"/api/get-webhooks",
+	"/api/get-webhook",
+	"/api/get-webhook-events",
+}
+
+var ownerParamObject = []string{
+	"/api/get-dashboard",
+	"/api/get-dashboard-providers",
+	"/api/get-dashboard-mfa",
+	"/api/get-dashboard-heatmap",
+	"/api/get-user-count",
+}
+
+var sessionPkIdObject = []string{
+	"/api/get-session",
+	"/api/is-session-duplicated",
+}
+
+// sessionObject lists the APIs whose controllers ignore the request parameters and
+// act on the signed-in user's organization (false) or on the user themselves (true),
+// which makes that the object to authorize against.
+var sessionObject = map[string]bool{
+	"/api/upload-groups":                false,
+	"/api/upload-roles":                 false,
+	"/api/upload-permissions":           false,
+	"/api/get-permissions-by-submitter": true,
+}
+
+func getSessionObject(ctx *context.Context, withName bool) (string, string, error) {
+	userId, ok := ctx.Input.GetData("currentUserId").(string)
+	if !ok || userId == "" {
+		return "", "", nil
+	}
+
+	owner, name, err := util.GetOwnerAndNameFromIdWithError(userId)
+	if err != nil {
+		return "", "", err
+	}
+	if !withName {
+		name = ""
+	}
+	return owner, name, nil
+}
+
+func getSessionPkIdObject(ctx *context.Context) (string, string, error) {
+	sessionPkId := ctx.Input.Query("sessionPkId")
+	tokens := strings.Split(sessionPkId, "/")
+	if len(tokens) != 3 || tokens[0] == "" || tokens[1] == "" {
+		return "", "", fmt.Errorf("invalid sessionPkId: %s", sessionPkId)
+	}
+	return tokens[0], tokens[1], nil
+}
+
 type Object struct {
-	Owner        string `json:"owner"`
-	Name         string `json:"name"`
-	AccessKey    string `json:"accessKey"`
-	AccessSecret string `json:"accessSecret"`
+	Owner string `json:"owner"`
+	Name  string `json:"name"`
+}
+
+type ObjectWithOrg struct {
+	Object
+	Organization string `json:"organization"`
+}
+
+// ownerNameFromForm parses form or multipart body for authorization checks when the
+// request is not JSON (e.g. MFA APIs use FormData). RequestBodyFilter caches the raw
+// body but leaves Request.Body restorable for ParseForm/ParseMultipartForm.
+func ownerNameFromForm(ctx *context.Context) (string, string) {
+	ct := ctx.Request.Header.Get("Content-Type")
+	if strings.Contains(ct, "multipart/form-data") {
+		_ = ctx.Request.ParseMultipartForm(32 << 20)
+	} else {
+		_ = ctx.Request.ParseForm()
+	}
+	return ctx.Request.Form.Get("owner"), ctx.Request.Form.Get("name")
+}
+
+func checkIsOrgOwnerObject(urlPath string) bool {
+	for _, suffix := range orgOwnerObject {
+		if strings.HasSuffix(urlPath, suffix) || strings.Contains(urlPath, suffix+"s") {
+			return true
+		}
+	}
+	return false
 }
 
 func getUsername(ctx *context.Context) (username string) {
-	defer func() {
-		if r := recover(); r != nil {
-			username, _ = getUsernameByClientIdSecret(ctx)
-		}
-	}()
-
-	username = ctx.Input.Session("username").(string)
-
-	if username == "" {
+	username, ok := ctx.Input.Session("username").(string)
+	if !ok || username == "" {
 		username, _ = getUsernameByClientIdSecret(ctx)
 	}
 
-	if username == "" {
-		username = getUsernameByKeys(ctx)
+	session := ctx.Input.Session("SessionData")
+	if session == nil {
+		return
 	}
+
+	sessionData := &controllers.SessionData{}
+	err := util.JsonToStruct(session.(string), sessionData)
+	if err != nil {
+		logs.Error("GetSessionData failed, error: %s", err)
+		return ""
+	}
+
+	if sessionData.ExpireTime != 0 &&
+		sessionData.ExpireTime < time.Now().Unix() {
+		err = ctx.Input.CruSession.Set(stdcontext.Background(), "username", "")
+		if err != nil {
+			logs.Error("Failed to clear expired session, error: %s", err)
+			return ""
+		}
+		err = ctx.Input.CruSession.Delete(stdcontext.Background(), "SessionData")
+		if err != nil {
+			logs.Error("Failed to clear expired session, error: %s", err)
+		}
+		return ""
+	}
+
 	return
+}
+
+const requestCredentialUserKey = "requestCredentialUser"
+
+func isCrossOriginCookieRequest(ctx *context.Context) bool {
+	method := ctx.Request.Method
+	if method == http.MethodGet || method == http.MethodHead || method == http.MethodOptions {
+		return false
+	}
+	if strings.HasPrefix(ctx.Request.URL.Path, "/api/saml/logout/") {
+		return false
+	}
+
+	origin := ctx.Request.Header.Get("Origin")
+	if origin == "" || util.IsCredentialedOrigin(origin, conf.GetConfigString("origin"), ctx.Request.Host) {
+		return false
+	}
+
+	requestCredentialUser, _ := ctx.Input.GetData(requestCredentialUserKey).(string)
+	return requestCredentialUser == ""
 }
 
 func getSubject(ctx *context.Context) (string, string) {
 	username := getUsername(ctx)
-	if username == "" {
+	if username == "" || isCrossOriginCookieRequest(ctx) {
 		return "anonymous", "anonymous"
 	}
 
 	// username == "built-in/admin"
-	return util.GetOwnerAndNameFromId(username)
+	owner, name, err := util.GetOwnerAndNameFromIdWithError(username)
+	if err != nil {
+		panic(err)
+	}
+	return owner, name
 }
 
-func getObject(ctx *context.Context) (string, string) {
+func getObject(ctx *context.Context) (string, string, error) {
 	method := ctx.Request.Method
 	path := ctx.Request.URL.Path
+	// AddUser acts on the body only. SDK 0.43 computes ?id before filling Owner,
+	// so its unused query ID can be "/name" while the actual body is built-in/name.
+	if conf.BuiltinIsolationEnabled() && method == http.MethodPost && path == "/api/add-user" {
+		owner, name := getObjectFromBody(ctx, path)
+		return owner, name, nil
+	}
+
+	if strings.HasPrefix(path, "/api/server/") {
+		return ctx.Input.Param(":owner"), ctx.Input.Param(":name"), nil
+	}
+
+	if withName, ok := sessionObject[path]; ok {
+		return getSessionObject(ctx, withName)
+	}
 
 	if method == http.MethodGet {
+		if util.InSlice(sessionPkIdObject, path) {
+			return getSessionPkIdObject(ctx)
+		}
+
+		if util.InSlice(ownerParamObject, path) {
+			return ctx.Input.Query("owner"), "", nil
+		}
+
 		if ctx.Request.URL.Path == "/api/get-policies" {
-			if ctx.Input.Query("id") == "/" {
-				adapterId := ctx.Input.Query("adapterId")
-				if adapterId != "" {
-					return util.GetOwnerAndNameFromIdNoCheck(adapterId)
-				}
-			} else {
-				// query == "?id=built-in/admin"
-				id := ctx.Input.Query("id")
-				if id != "" {
-					return util.GetOwnerAndNameFromIdNoCheck(id)
-				}
+			// GetPolicies() works on the adapter as soon as "adapterId" is given and
+			// falls back to the enforcer of "id", so authorize the same way.
+			adapterId := ctx.Input.Query("adapterId")
+			if adapterId != "" {
+				return util.GetOwnerAndNameFromIdWithError(adapterId)
+			}
+
+			// query == "?id=built-in/admin"
+			id := ctx.Input.Query("id")
+			if id != "" && id != "/" {
+				return util.GetOwnerAndNameFromIdWithError(id)
 			}
 		}
 
-		if !(strings.HasPrefix(ctx.Request.URL.Path, "/api/get-") && strings.HasSuffix(ctx.Request.URL.Path, "s")) {
+		// The "organization" query param may decide the authorized object only for the
+		// APIs whose controllers really scope the operation by it. Anywhere else it is
+		// an unverified claim that would let a client get a request authorized against
+		// its own organization and executed against another organization's object.
+		organization := ""
+		if util.InSlice(organizationParamObject, path) {
+			organization = ctx.Input.Query("organization")
+		}
+
+		if !(strings.HasPrefix(ctx.Request.URL.Path, "/api/get-") && strings.HasSuffix(ctx.Request.URL.Path, "s")) || ctx.Request.URL.Path == "/api/get-ldap-users" {
 			// query == "?id=built-in/admin"
 			id := ctx.Input.Query("id")
 			if id != "" {
-				return util.GetOwnerAndNameFromIdNoCheck(id)
+				owner, name, err := util.GetOwnerAndNameFromIdWithError(id)
+				if err != nil {
+					return owner, name, err
+				}
+				if organization != "" {
+					return organization, name, nil
+				}
+
+				if strings.HasSuffix(ctx.Request.URL.Path, "organization") {
+					return name, name, nil
+				}
+				return owner, name, nil
 			}
 		}
 
 		owner := ctx.Input.Query("owner")
+		if organization != "" {
+			return organization, "", nil
+		}
 		if owner != "" {
-			return owner, ""
+			return owner, "", nil
 		}
 
-		return "", ""
+		return "", "", nil
 	} else {
-		if path == "/api/add-policy" || path == "/api/remove-policy" || path == "/api/update-policy" {
+		if path == "/api/add-policy" || path == "/api/remove-policy" || path == "/api/update-policy" || path == "/api/send-invitation" {
 			id := ctx.Input.Query("id")
 			if id != "" {
-				return util.GetOwnerAndNameFromIdNoCheck(id)
+				return util.GetOwnerAndNameFromIdWithError(id)
 			}
 		}
 
-		body := ctx.Input.RequestBody
-		if len(body) == 0 {
-			return ctx.Request.Form.Get("owner"), ctx.Request.Form.Get("name")
-		}
-
-		var obj Object
-		err := json.Unmarshal(body, &obj)
-		if err != nil {
-			// panic(err)
-			return "", ""
-		}
-
-		if path == "/api/delete-resource" {
-			tokens := strings.Split(obj.Name, "/")
-			if len(tokens) >= 5 {
-				obj.Name = tokens[4]
+		if path == "/api/enforce" || path == "/api/batch-enforce" {
+			// the body is the casbin request, the object is the permission, model or enforcer
+			for _, param := range []string{"permissionId", "modelId", "enforcerId"} {
+				if id := ctx.Input.Query(param); id != "" {
+					return util.GetOwnerAndNameFromIdWithError(id)
+				}
 			}
 		}
 
-		return obj.Owner, obj.Name
+		isOwnerObjPath := checkIsOrgOwnerObject(path)
+
+		// For non-GET requests, if the `id` query param is present it is the
+		// authoritative identifier of the object being operated on.  Use it
+		// instead of the request body so that an attacker cannot spoof the
+		// object owner by injecting "owner":"admin" (or any other value) into
+		// the request body while pointing the URL at a different organization's
+		// resource.
+		if id := ctx.Input.Query("id"); id != "" && (!isOwnerObjPath || strings.HasSuffix(path, "update-organization")) {
+			owner, name, err := util.GetOwnerAndNameFromIdWithError(id)
+			if err == nil {
+				// an organization row is owned by "admin", authorize it by its own name
+				if strings.HasSuffix(path, "-organization") {
+					return name, name, nil
+				}
+				return owner, name, nil
+			}
+		}
+
+		owner, name := getObjectFromBody(ctx, path)
+		return owner, name, nil
 	}
 }
 
-func getKeys(ctx *context.Context) (string, string) {
-	method := ctx.Request.Method
-
-	if method == http.MethodGet {
-		accessKey := ctx.Input.Query("accessKey")
-		accessSecret := ctx.Input.Query("accessSecret")
-		return accessKey, accessSecret
-	} else {
-		body := ctx.Input.RequestBody
-
-		if len(body) == 0 {
-			return ctx.Request.Form.Get("accessKey"), ctx.Request.Form.Get("accessSecret")
-		}
-
-		var obj Object
-		err := json.Unmarshal(body, &obj)
-		if err != nil {
-			return "", ""
-		}
-
-		return obj.AccessKey, obj.AccessSecret
+// getObjectFromBody returns the object described by the request body, which is the
+// object most controllers actually operate on.
+func getObjectFromBody(ctx *context.Context, path string) (string, string) {
+	body := ctx.Input.RequestBody
+	if len(body) == 0 {
+		return ctx.Request.Form.Get("owner"), ctx.Request.Form.Get("name")
 	}
+
+	if checkIsOrgOwnerObject(path) && !strings.HasSuffix(path, "-organization") {
+		var objWithOrg ObjectWithOrg
+		err := json.Unmarshal(body, &objWithOrg)
+		if err != nil {
+			return ownerNameFromForm(ctx)
+		}
+		return objWithOrg.Organization, objWithOrg.Name
+	}
+
+	var obj Object
+	err := json.Unmarshal(body, &obj)
+	if err != nil {
+		// Form-urlencoded, multipart, or other non-JSON body (common for web FormData).
+		return ownerNameFromForm(ctx)
+	}
+
+	if strings.HasSuffix(path, "-organization") {
+		return obj.Name, obj.Name
+	}
+
+	if path == "/api/delete-resource" {
+		tokens := strings.Split(obj.Name, "/")
+		if len(tokens) >= 5 {
+			obj.Name = tokens[4]
+		}
+	}
+
+	return obj.Owner, obj.Name
+}
+
+// getObjects returns every object the request may act on. The authorization layer
+// resolves the object from the "?id=" query param, while many controllers ignore it
+// and act on the owner and name carried by the request body, so both objects must be
+// authorized. Otherwise an org admin can have a request authorized against an object
+// of their own organization and executed against another organization's object.
+func getObjects(ctx *context.Context) ([]Object, error) {
+	path := ctx.Request.URL.Path
+	if path == "/api/mcp" && ctx.Request.Method == http.MethodPost {
+		objects, err := getMcpObjects(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if len(objects) == 0 {
+			objects = []Object{{}}
+		}
+		return objects, nil
+	}
+
+	owner, name, err := getObject(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	objects := []Object{{Owner: owner, Name: name}}
+
+	if ctx.Request.Method == http.MethodGet {
+		// Some APIs accept both "?id=" and "?owner=" and read the latter, e.g.
+		// /api/get-user-count and /api/get-dashboard, so authorize it as well. The
+		// APIs scoped by "?organization=" are left out, their row owner is "admin".
+		queryOwner := ctx.Input.Query("owner")
+		if queryOwner != "" && queryOwner != owner && !util.InSlice(organizationParamObject, path) {
+			objects = append(objects, Object{Owner: queryOwner})
+		}
+		return objects, nil
+	}
+
+	if _, ok := sessionObject[path]; ok {
+		return objects, nil
+	}
+
+	bodyOwner, bodyName := getObjectFromBody(ctx, path)
+	objects = appendObject(objects, bodyOwner, bodyName)
+
+	formOwner, formName := ownerNameFromForm(ctx)
+	objects = appendObject(objects, formOwner, formName)
+
+	return objects, nil
+}
+
+func appendObject(objects []Object, owner string, name string) []Object {
+	if owner == "" {
+		return objects
+	}
+
+	for _, obj := range objects {
+		if obj.Owner == owner && obj.Name == name {
+			return objects
+		}
+	}
+	return append(objects, Object{Owner: owner, Name: name})
 }
 
 func willLog(subOwner string, subName string, method string, urlPath string, objOwner string, objName string) bool {
@@ -159,7 +432,9 @@ func willLog(subOwner string, subName string, method string, urlPath string, obj
 	return true
 }
 
-func getUrlPath(urlPath string) string {
+func getUrlPath(ctx *context.Context) string {
+	urlPath := ctx.Request.URL.Path
+
 	if strings.HasPrefix(urlPath, "/cas") && (strings.HasSuffix(urlPath, "/serviceValidate") || strings.HasSuffix(urlPath, "/proxy") || strings.HasSuffix(urlPath, "/proxyValidate") || strings.HasSuffix(urlPath, "/validate") || strings.HasSuffix(urlPath, "/p3/serviceValidate") || strings.HasSuffix(urlPath, "/p3/proxyValidate") || strings.HasSuffix(urlPath, "/samlValidate")) {
 		return "/cas"
 	}
@@ -172,6 +447,10 @@ func getUrlPath(urlPath string) string {
 		return "/api/login/oauth"
 	}
 
+	if strings.HasPrefix(urlPath, "/api/oauth/register") {
+		return "/api/oauth/register"
+	}
+
 	if strings.HasPrefix(urlPath, "/api/webauthn") {
 		return "/api/webauthn"
 	}
@@ -180,24 +459,139 @@ func getUrlPath(urlPath string) string {
 		return "/api/saml/redirect"
 	}
 
+	if strings.HasPrefix(urlPath, "/api/saml/logout") {
+		return "/api/saml/logout"
+	}
+
 	return urlPath
+}
+
+func getExtraInfo(ctx *context.Context, urlPath string) map[string]interface{} {
+	var extra map[string]interface{}
+	if urlPath == "/api/mcp" {
+		var m map[string]interface{}
+		if err := json.Unmarshal(ctx.Input.RequestBody, &m); err != nil {
+			return nil
+		}
+
+		method, ok := m["method"].(string)
+		if !ok {
+			return nil
+		}
+
+		return map[string]interface{}{
+			"detailPathUrl": method,
+		}
+	}
+	return extra
+}
+
+func getImpersonateUser(ctx *context.Context, subOwner, subName, username string) (string, string, string) {
+	impersonateUser, ok := ctx.Input.Session("impersonateUser").(string)
+	impersonateUserCookie := ctx.GetCookie("impersonateUser")
+	if ok && impersonateUser != "" && impersonateUserCookie != "" {
+		user, err := object.GetUser(util.GetId(subOwner, subName))
+		if err != nil {
+			panic(err)
+		}
+
+		if user != nil {
+			impUserOwner, impUserName, err := util.GetOwnerAndNameFromIdWithError(impersonateUser)
+			if err != nil {
+				panic(err)
+			}
+
+			if user.IsGlobalAdmin() || (user.IsOrganizationAdmin() && impUserOwner == user.Owner) {
+				ctx.Input.SetData("impersonating", true)
+				// For exit-impersonate-user, keep the real admin identity so authz uses admin's permissions
+				if getUrlPath(ctx) == "/api/exit-impersonate-user" {
+					return subOwner, subName, username
+				}
+				return impUserOwner, impUserName, impersonateUser
+			}
+		}
+	}
+
+	return subOwner, subName, username
 }
 
 func ApiFilter(ctx *context.Context) {
 	subOwner, subName := getSubject(ctx)
-	method := ctx.Request.Method
-	urlPath := getUrlPath(ctx.Request.URL.Path)
-
-	objOwner, objName := "", ""
-	if urlPath != "/api/get-app-login" && urlPath != "/api/get-resource" {
-		objOwner, objName = getObject(ctx)
+	// stash current user info into request context for controllers
+	username := ""
+	if !(subOwner == "anonymous" && subName == "anonymous") {
+		username = fmt.Sprintf("%s/%s", subOwner, subName)
+		subOwner, subName, username = getImpersonateUser(ctx, subOwner, subName, username)
 	}
+	ctx.Input.SetData("currentUserId", username)
+	// App credentials must authenticate this request, never a cached cookie alone.
+	if conf.BuiltinIsolationEnabled() && subOwner == "app" {
+		appUser, err := object.GetAppUser(username)
+		if err != nil {
+			responseError(ctx, err.Error())
+			return
+		}
+		credentialUser, _ := ctx.Input.GetData(requestCredentialUserKey).(string)
+		if appUser != nil && appUser.Owner == "built-in" && credentialUser != username {
+			denyRequest(ctx)
+			return
+		}
+	}
+
+	// the Session row belongs to the signed-in user, not to the impersonated one
+	if sessionUser := getSessionUser(ctx); sessionUser != "" {
+		sessionOwner, sessionName := util.GetOwnerAndNameFromIdNoCheck(sessionUser)
+		beegoSessionId := ctx.Input.CruSession.SessionID(stdcontext.Background())
+		util.SafeGoroutine(func() {
+			err := object.UpdateSessionLastActiveTime(sessionOwner, sessionName, beegoSessionId)
+			if err != nil {
+				logs.Error("UpdateSessionLastActiveTime failed, error: %s", err)
+			}
+		})
+	}
+
+	method := ctx.Request.Method
+	urlPath := getUrlPath(ctx)
+	if !checkDynamicClientSession(ctx, urlPath) {
+		return
+	}
+	extraInfo := getExtraInfo(ctx, urlPath)
+
+	objects := []Object{{}}
+	if urlPath != "/api/get-app-login" && urlPath != "/api/get-resource" {
+		var err error
+		objects, err = getObjects(ctx)
+		if err != nil {
+			responseError(ctx, err.Error())
+			return
+		}
+	}
+	objOwner, objName := objects[0].Owner, objects[0].Name
 
 	if strings.HasPrefix(urlPath, "/api/notify-payment") {
 		urlPath = "/api/notify-payment"
 	}
 
-	isAllowed := authz.IsAllowed(subOwner, subName, method, urlPath, objOwner, objName)
+	isAllowed := true
+	for _, obj := range objects {
+		allowed, err := authz.IsAllowed(subOwner, subName, method, urlPath, obj.Owner, obj.Name, extraInfo)
+		if err != nil {
+			responseError(ctx, err.Error())
+			return
+		}
+
+		if !allowed {
+			isAllowed = false
+			objOwner, objName = obj.Owner, obj.Name
+			break
+		}
+	}
+
+	if method != "GET" && !strings.HasSuffix(urlPath, "-entry") {
+		util.SafeGoroutine(func() {
+			writePermissionLog(objOwner, subOwner, subName, method, urlPath, isAllowed)
+		})
+	}
 
 	result := "deny"
 	if isAllowed {
@@ -207,6 +601,10 @@ func ApiFilter(ctx *context.Context) {
 	if willLog(subOwner, subName, method, urlPath, objOwner, objName) {
 		logLine := fmt.Sprintf("subOwner = %s, subName = %s, method = %s, urlPath = %s, obj.Owner = %s, obj.Name = %s, result = %s",
 			subOwner, subName, method, urlPath, objOwner, objName, result)
+		extra := formatExtraInfo(extraInfo)
+		if extra != "" {
+			logLine += fmt.Sprintf(", extraInfo = %s", extra)
+		}
 		fmt.Println(logLine)
 		util.LogInfo(ctx, logLine)
 	}
@@ -218,12 +616,127 @@ func ApiFilter(ctx *context.Context) {
 			return
 		}
 
-		record.Organization = subOwner
-		record.User = subName // auth:Unauthorized operation
+		// "anonymous" is the sentinel subject of an unauthenticated request, not a real user
+		if subOwner == "anonymous" {
+			record.User = subName
+			record.Organization = getOrganizationFromRequest(ctx)
+		} else {
+			err = record.SetUser(util.GetId(subOwner, subName))
+			if err != nil {
+				return
+			}
+		}
 		record.Response = fmt.Sprintf("{status:\"error\", msg:\"%s\"}", T(ctx, "auth:Unauthorized operation"))
 
 		util.SafeGoroutine(func() {
 			object.AddRecord(record)
 		})
 	}
+}
+
+// dynamicClientApis are the only APIs a session signed in with the access token of a dynamically
+// registered client may call: anyone can register such a client and get users to authorize it
+var dynamicClientApis = []string{
+	"/api/userinfo",
+	"/api/user",
+	"/api/mcp",
+	"/api/login/oauth",
+}
+
+// crossOrgClientApis are the only APIs a session signed in with the access token of another
+// organization's application may call: its admin gets the token of any global admin signing in to it
+var crossOrgClientApis = []string{
+	"/api/userinfo",
+	"/api/user",
+	"/api/login/oauth",
+}
+
+// checkDynamicClientSession keys on the "aud" that AutoSigninFilter stores in the session, so the
+// session cookie returned with a token-authenticated response is limited the same as the token
+func checkDynamicClientSession(ctx *context.Context, urlPath string) bool {
+	aud, ok := ctx.Input.Session("aud").(string)
+	if !ok || aud == "" {
+		return true
+	}
+
+	application, err := object.GetApplicationByClientId(aud)
+	if err != nil {
+		responseError(ctx, err.Error())
+		return false
+	}
+	if application == nil {
+		if conf.BuiltinIsolationEnabled() {
+			denyRequest(ctx)
+			return false
+		}
+		return true
+	}
+	if isClientSessionApiAllowed(application, getSessionUser(ctx), urlPath) {
+		return true
+	}
+
+	denyRequest(ctx)
+	return false
+}
+
+func isClientSessionApiAllowed(application *object.Application, userId string, urlPath string) bool {
+	// APP user tokens (including an administrator's) are identity tokens, not
+	// Casdoor console credentials. Interactive console login clears session aud.
+	if conf.BuiltinIsolationEnabled() && application.Organization == "built-in" && !object.IsAppUser(userId) {
+		return util.InSlice(crossOrgClientApis, urlPath)
+	}
+	if isCrossOrgClient(application, userId) {
+		return util.InSlice(crossOrgClientApis, urlPath)
+	}
+	if application.IsDynamicClient() {
+		return util.InSlice(dynamicClientApis, urlPath) || strings.HasPrefix(urlPath, "/api/server/")
+	}
+	return true
+}
+
+func isCrossOrgClient(application *object.Application, userId string) bool {
+	if (!conf.BuiltinIsolationEnabled() && application.Organization == "built-in") || userId == "" || object.IsAppUser(userId) {
+		return false
+	}
+	owner, _ := util.GetOwnerAndNameFromIdNoCheck(userId)
+	return owner != application.Organization
+}
+
+func writePermissionLog(objOwner, subOwner, subName, method, urlPath string, allowed bool) {
+	providers, err := object.GetProvidersByCategory(objOwner, "Log")
+	if err != nil {
+		return
+	}
+
+	severity := "info"
+	if !allowed {
+		severity = "warning"
+	}
+	message := fmt.Sprintf("sub=%s/%s method=%s url=%s objOwner=%s allowed=%v", subOwner, subName, method, urlPath, objOwner, allowed)
+
+	for _, provider := range providers {
+		// System Log is a pull-based collector; it does not accept Write calls.
+		if provider.Type == "System Log" {
+			continue
+		}
+		if provider.State == "Disabled" {
+			continue
+		}
+		logProvider, err := object.GetLogProviderFromProvider(provider)
+		if err != nil {
+			continue
+		}
+		_ = logProvider.Write(severity, message)
+	}
+}
+
+func formatExtraInfo(extra map[string]interface{}) string {
+	if extra == nil {
+		return ""
+	}
+	b, err := json.Marshal(extra)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }

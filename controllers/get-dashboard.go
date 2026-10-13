@@ -20,12 +20,70 @@ import "github.com/casdoor/casdoor/object"
 // @Title GetDashboard
 // @Tag System API
 // @Description get information of dashboard
+// @Param   owner query string true "The owner (organization) name"
 // @Success 200 {object} controllers.Response The Response object
 // @router /get-dashboard [get]
 func (c *ApiController) GetDashboard() {
-	owner := c.Input().Get("owner")
+	owner := c.Ctx.Input.Query("owner")
 
 	data, err := object.GetDashboard(owner)
+	if err != nil {
+		c.ResponseError(err.Error())
+		return
+	}
+
+	c.ResponseOk(data)
+}
+
+// GetDashboardProviderDistribution
+// @Title GetDashboardProviderDistribution
+// @Tag System API
+// @Description get provider type distribution for dashboard
+// @Param   owner query string true "The owner (organization) name"
+// @Success 200 {object} controllers.Response The Response object
+// @router /get-dashboard-providers [get]
+func (c *ApiController) GetDashboardProviderDistribution() {
+	owner := c.Ctx.Input.Query("owner")
+
+	data, err := object.GetDashboardProviderDistribution(owner)
+	if err != nil {
+		c.ResponseError(err.Error())
+		return
+	}
+
+	c.ResponseOk(data)
+}
+
+// GetDashboardMfaCoverage
+// @Title GetDashboardMfaCoverage
+// @Tag System API
+// @Description get MFA adoption coverage stats for dashboard
+// @Param   owner query string true "The owner (organization) name"
+// @Success 200 {object} controllers.Response The Response object
+// @router /get-dashboard-mfa [get]
+func (c *ApiController) GetDashboardMfaCoverage() {
+	owner := c.Ctx.Input.Query("owner")
+
+	data, err := object.GetDashboardMfaCoverage(owner)
+	if err != nil {
+		c.ResponseError(err.Error())
+		return
+	}
+
+	c.ResponseOk(data)
+}
+
+// GetDashboardLoginHeatmap
+// @Title GetDashboardLoginHeatmap
+// @Tag System API
+// @Description get system activity heatmap data for dashboard
+// @Param   owner query string true "The owner (organization) name"
+// @Success 200 {object} controllers.Response The Response object
+// @router /get-dashboard-heatmap [get]
+func (c *ApiController) GetDashboardLoginHeatmap() {
+	owner := c.Ctx.Input.Query("owner")
+
+	data, err := object.GetDashboardLoginHeatmap(owner)
 	if err != nil {
 		c.ResponseError(err.Error())
 		return

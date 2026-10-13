@@ -29,16 +29,17 @@ func init() {
 func getCronMap(name string) *cron.Cron {
 	m, ok := cronMap[name]
 	if !ok {
-		m = cron.New()
+		m = cron.New(cron.WithChain(cron.SkipIfStillRunning(cron.DefaultLogger)))
 		cronMap[name] = m
 	}
 	return m
 }
 
 func clearCron(name string) {
-	cron, ok := cronMap[name]
+	c, ok := cronMap[name]
 	if ok {
-		cron.Stop()
+		ctx := c.Stop()
+		<-ctx.Done()
 		delete(cronMap, name)
 	}
 }
@@ -52,17 +53,30 @@ func addSyncerJob(syncer *Syncer) error {
 
 	err := syncer.initAdapter()
 	if err != nil {
+		recordSyncerError(syncer, err)
 		return err
+	}
+
+	// Sync groups first so that the groups referenced by the synced users already exist
+	err = syncer.syncGroups()
+	if err != nil {
+		// Log error but don't fail the entire sync
+		recordSyncerError(syncer, err)
+		fmt.Printf("Warning: syncGroups() error: %s\n", err.Error())
 	}
 
 	err = syncer.syncUsers()
 	if err != nil {
+		recordSyncerError(syncer, err)
 		return err
 	}
 
 	schedule := fmt.Sprintf("@every %ds", syncer.SyncInterval)
 	cron := getCronMap(syncer.Name)
-	_, err = cron.AddFunc(schedule, syncer.syncUsersNoError)
+	_, err = cron.AddFunc(schedule, func() {
+		syncer.syncGroupsNoError()
+		syncer.syncUsersNoError()
+	})
 	if err != nil {
 		return err
 	}
@@ -73,4 +87,6 @@ func addSyncerJob(syncer *Syncer) error {
 
 func deleteSyncerJob(syncer *Syncer) {
 	clearCron(syncer.Name)
+	// Close any open connections when deleting the job
+	_ = syncer.Close()
 }

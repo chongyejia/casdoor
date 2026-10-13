@@ -15,10 +15,10 @@
 package proxy
 
 import (
-	"crypto/tls"
 	"fmt"
 	"net"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -62,17 +62,36 @@ func getProxyHttpClient() *http.Client {
 		return &http.Client{}
 	}
 
-	if !isAddressOpen(socks5Proxy) {
+	if !strings.HasPrefix(socks5Proxy, "socks5://") {
+		socks5Proxy = "socks5://" + socks5Proxy
+	}
+
+	URL, err := url.Parse(socks5Proxy)
+	if err != nil {
+		fmt.Printf("Invalid socks5 proxy URL: %s, error: %v\n", socks5Proxy, err)
 		return &http.Client{}
 	}
 
+	if !isAddressOpen(URL.Host) {
+		return &http.Client{}
+	}
+
+	var auth *proxy.Auth
+	if URL.User != nil {
+		password, _ := URL.User.Password()
+		auth = &proxy.Auth{
+			User:     URL.User.Username(),
+			Password: password,
+		}
+	}
+
 	// https://stackoverflow.com/questions/33585587/creating-a-go-socks5-client
-	dialer, err := proxy.SOCKS5("tcp", socks5Proxy, nil, proxy.Direct)
+	dialer, err := proxy.SOCKS5("tcp", URL.Host, auth, proxy.Direct)
 	if err != nil {
 		panic(err)
 	}
 
-	tr := &http.Transport{Dial: dialer.Dial, TLSClientConfig: &tls.Config{InsecureSkipVerify: true}}
+	tr := &http.Transport{Dial: dialer.Dial}
 	return &http.Client{
 		Transport: tr,
 	}

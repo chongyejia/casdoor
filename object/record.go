@@ -16,51 +16,83 @@ package object
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
-	"regexp"
 	"strings"
 
-	"github.com/beego/beego/context"
+	"github.com/beego/beego/v2/server/web/context"
 	"github.com/casdoor/casdoor/conf"
 	"github.com/casdoor/casdoor/util"
-	"github.com/casvisor/casvisor-go-sdk/casvisorsdk"
+	"github.com/casdoor/casdoor/util/auditsecret"
 )
 
-var (
-	logPostOnly   bool
-	passwordRegex *regexp.Regexp
-)
+var logPostOnly bool
+
+// alwaysLoggedActions lists the actions that are always recorded, even for GET
+// requests when "logPostOnly" is enabled. These endpoints accept GET by design
+// (OIDC RP-Initiated Logout navigates the browser to them), so filtering them
+// out would silently drop security-relevant audit rows and their webhooks.
+// Add an action here when losing its audit trail matters more than the noise.
+var alwaysLoggedActions = map[string]bool{
+	"logout":     true,
+	"sso-logout": true,
+}
 
 func init() {
 	logPostOnly = conf.GetConfigBool("logPostOnly")
-	passwordRegex = regexp.MustCompile("\"password\":\".+\"")
 }
 
 type Record struct {
-	casvisorsdk.Record
+	Id int `xorm:"int notnull pk autoincr" json:"id"`
+
+	Owner       string `xorm:"varchar(100) index" json:"owner"`
+	Name        string `xorm:"varchar(100) index" json:"name"`
+	CreatedTime string `xorm:"varchar(100)" json:"createdTime"`
+
+	Organization string `xorm:"varchar(100)" json:"organization"`
+	ClientIp     string `xorm:"varchar(100)" json:"clientIp"`
+	User         string `xorm:"varchar(100)" json:"user"`
+	Method       string `xorm:"varchar(100)" json:"method"`
+	RequestUri   string `xorm:"varchar(1000)" json:"requestUri"`
+	Action       string `xorm:"varchar(1000)" json:"action"`
+	Language     string `xorm:"varchar(100)" json:"language"`
+
+	Object     string `xorm:"mediumtext" json:"object"`
+	Response   string `xorm:"mediumtext" json:"response"`
+	StatusCode int    `json:"statusCode"`
+
+	Detail string `xorm:"varchar(100)" json:"detail"`
+
+	IsTriggered bool `json:"isTriggered"`
 }
 
 type Response struct {
 	Status string `json:"status"`
 	Msg    string `json:"msg"`
+
+	Data interface{} `json:"data"`
 }
 
-func maskPassword(recordString string) string {
-	return passwordRegex.ReplaceAllString(recordString, "\"password\":\"***\"")
+func maskSecrets(recordString string) string {
+	return auditsecret.Body(recordString, "application/json")
 }
 
-func NewRecord(ctx *context.Context) (*casvisorsdk.Record, error) {
-	ip := strings.Replace(util.GetIPFromRequest(ctx.Request), ": ", "", -1)
+func NewRecord(ctx *context.Context) (*Record, error) {
+	clientIp := strings.Replace(util.GetClientIpFromRequest(ctx.Request), ": ", "", -1)
 	action := strings.Replace(ctx.Request.URL.Path, "/api/", "", -1)
-	requestUri := util.FilterQuery(ctx.Request.RequestURI, []string{"accessToken"})
+	if strings.HasPrefix(action, "notify-payment") {
+		action = "notify-payment"
+	}
+
+	// Parse encoded parameter names before persisting or forwarding audit data.
+	requestUri := auditsecret.URI(ctx.Request.RequestURI)
 	if len(requestUri) > 1000 {
 		requestUri = requestUri[0:1000]
 	}
 
 	object := ""
 	if ctx.Input.RequestBody != nil && len(ctx.Input.RequestBody) != 0 {
-		object = string(ctx.Input.RequestBody)
-		object = maskPassword(object)
+		object = auditsecret.Body(string(ctx.Input.RequestBody), ctx.Request.Header.Get("Content-Type"))
 	}
 
 	respBytes, err := json.Marshal(ctx.Input.Data()["json"])
@@ -74,16 +106,25 @@ func NewRecord(ctx *context.Context) (*casvisorsdk.Record, error) {
 		return nil, err
 	}
 
-	language := ctx.Request.Header.Get("Accept-Language")
-	if len(language) > 2 {
-		language = language[0:2]
+	if action != "buy-product" && action != "notify-payment" {
+		resp.Data = nil
 	}
-	languageCode := conf.GetLanguage(language)
 
-	record := casvisorsdk.Record{
+	dataResp := ""
+	if resp.Data != nil {
+		dataByte, err := json.Marshal(resp.Data)
+		if err != nil {
+			return nil, err
+		}
+		dataResp = fmt.Sprintf(", data:%s", string(dataByte))
+	}
+
+	languageCode := conf.GetAcceptLanguage(ctx.Request.Header.Get("Accept-Language"))
+
+	record := Record{
 		Name:        util.GenerateId(),
 		CreatedTime: util.GetCurrentTime(),
-		ClientIp:    ip,
+		ClientIp:    clientIp,
 		User:        "",
 		Method:      ctx.Request.Method,
 		RequestUri:  requestUri,
@@ -91,30 +132,57 @@ func NewRecord(ctx *context.Context) (*casvisorsdk.Record, error) {
 		Language:    languageCode,
 		Object:      object,
 		StatusCode:  200,
-		Response:    fmt.Sprintf("{status:\"%s\", msg:\"%s\"}", resp.Status, resp.Msg),
+		Response:    fmt.Sprintf("{status:\"%s\", msg:\"%s\"%s}", resp.Status, resp.Msg, dataResp),
 		IsTriggered: false,
 	}
 	return &record, nil
 }
 
-func addRecord(record *casvisorsdk.Record) (int64, error) {
+// SetUser sets the record's organization and user from the subject's user ID. An M2M
+// credential ("app/<name>") is recorded in the application's organization, because the
+// pseudo organization "app" is shown by no organization's audit log.
+func (record *Record) SetUser(userId string) error {
+	if IsAppUser(userId) {
+		appUser, err := GetAppUser(userId)
+		if err != nil {
+			return err
+		}
+
+		if appUser != nil {
+			record.Organization, record.User = appUser.Owner, appUser.Name
+			return nil
+		}
+	}
+
+	owner, name, err := util.GetOwnerAndNameFromIdWithError(userId)
+	if err != nil {
+		return err
+	}
+
+	record.Organization, record.User = owner, name
+	return nil
+}
+
+func addRecord(record *Record) (int64, error) {
 	affected, err := ormer.Engine.Insert(record)
 	return affected, err
 }
 
-func AddRecord(record *casvisorsdk.Record) bool {
+func AddRecord(record *Record) bool {
 	if logPostOnly {
-		if record.Method == "GET" {
+		if record.Method == "GET" && !alwaysLoggedActions[record.Action] {
 			return false
 		}
 	}
 
-	if record.Organization == "app" {
-		return false
+	// an empty owner matches no audit log query and no retention policy
+	if record.Organization == "" {
+		record.Organization = "built-in"
 	}
-
 	record.Owner = record.Organization
-	record.Object = maskPassword(record.Object)
+	// Also sanitize records created outside NewRecord, before any webhook or storage.
+	record.RequestUri = auditsecret.URI(record.RequestUri)
+	record.Object = maskSecrets(record.Object)
 
 	errWebhook := SendWebhooks(record)
 	if errWebhook == nil {
@@ -123,31 +191,24 @@ func AddRecord(record *casvisorsdk.Record) bool {
 		fmt.Println(errWebhook)
 	}
 
-	if casvisorsdk.GetClient() == nil {
-		affected, err := addRecord(record)
-		if err != nil {
-			panic(err)
-		}
-
-		return affected != 0
-	}
-
-	affected, err := casvisorsdk.AddRecord(record)
+	affected, err := addRecord(record)
 	if err != nil {
-		fmt.Printf("AddRecord() error: %s", err.Error())
+		panic(err)
 	}
 
-	return affected
+	sendAuditRecord(record)
+
+	return affected != 0
 }
 
-func GetRecordCount(field, value string, filterRecord *casvisorsdk.Record) (int64, error) {
+func GetRecordCount(field, value string, filterRecord *Record) (int64, error) {
 	session := GetSession("", -1, -1, field, value, "", "")
 	return session.Count(filterRecord)
 }
 
-func GetRecords() ([]*casvisorsdk.Record, error) {
-	records := []*casvisorsdk.Record{}
-	err := ormer.Engine.Desc("id").Find(&records)
+func GetRecords(organization string) ([]*Record, error) {
+	records := []*Record{}
+	err := ormer.Engine.Desc("id").Find(&records, &Record{Organization: organization})
 	if err != nil {
 		return records, err
 	}
@@ -155,8 +216,8 @@ func GetRecords() ([]*casvisorsdk.Record, error) {
 	return records, nil
 }
 
-func GetPaginationRecords(offset, limit int, field, value, sortField, sortOrder string, filterRecord *casvisorsdk.Record) ([]*casvisorsdk.Record, error) {
-	records := []*casvisorsdk.Record{}
+func GetPaginationRecords(offset, limit int, field, value, sortField, sortOrder string, filterRecord *Record) ([]*Record, error) {
+	records := []*Record{}
 
 	if sortField == "" || sortOrder == "" {
 		sortField = "id"
@@ -172,8 +233,8 @@ func GetPaginationRecords(offset, limit int, field, value, sortField, sortOrder 
 	return records, nil
 }
 
-func GetRecordsByField(record *casvisorsdk.Record) ([]*casvisorsdk.Record, error) {
-	records := []*casvisorsdk.Record{}
+func GetRecordsByField(record *Record) ([]*Record, error) {
+	records := []*Record{}
 	err := ormer.Engine.Find(&records, record)
 	if err != nil {
 		return records, err
@@ -182,8 +243,8 @@ func GetRecordsByField(record *casvisorsdk.Record) ([]*casvisorsdk.Record, error
 	return records, nil
 }
 
-func CopyRecord(record *casvisorsdk.Record) *casvisorsdk.Record {
-	res := &casvisorsdk.Record{
+func CopyRecord(record *Record) *Record {
+	res := &Record{
 		Owner:        record.Owner,
 		Name:         record.Name,
 		CreatedTime:  record.CreatedTime,
@@ -196,6 +257,7 @@ func CopyRecord(record *casvisorsdk.Record) *casvisorsdk.Record {
 		Language:     record.Language,
 		Object:       record.Object,
 		Response:     record.Response,
+		Detail:       record.Detail,
 		IsTriggered:  record.IsTriggered,
 	}
 	return res
@@ -229,7 +291,7 @@ func getFilteredWebhooks(webhooks []*Webhook, organization string, action string
 	return res
 }
 
-func addWebhookRecord(webhook *Webhook, record *casvisorsdk.Record, statusCode int, respBody string, sendError error) error {
+func addWebhookRecord(webhook *Webhook, record *Record, statusCode int, respBody string, sendError error) error {
 	if statusCode == 200 {
 		return nil
 	}
@@ -238,7 +300,7 @@ func addWebhookRecord(webhook *Webhook, record *casvisorsdk.Record, statusCode i
 		respBody = respBody[0:300]
 	}
 
-	webhookRecord := &casvisorsdk.Record{
+	webhookRecord := &Record{
 		Owner:        record.Owner,
 		Name:         util.GenerateId(),
 		CreatedTime:  util.GetCurrentTime(),
@@ -263,7 +325,28 @@ func addWebhookRecord(webhook *Webhook, record *casvisorsdk.Record, statusCode i
 	return err
 }
 
-func SendWebhooks(record *casvisorsdk.Record) error {
+func filterRecordObject(object string, objectFields []string) string {
+	var rawObject map[string]interface{}
+	_ = json.Unmarshal([]byte(object), &rawObject)
+
+	if rawObject == nil {
+		return object
+	}
+
+	filteredObject := make(map[string]interface{})
+
+	for _, field := range objectFields {
+		fieldValue, ok := rawObject[field]
+		if !ok {
+			continue
+		}
+		filteredObject[field] = fieldValue
+	}
+
+	return util.StructToJson(filteredObject)
+}
+
+func SendWebhooks(record *Record) error {
 	webhooks, err := getWebhooksByOrganization("")
 	if err != nil {
 		return err
@@ -271,32 +354,38 @@ func SendWebhooks(record *casvisorsdk.Record) error {
 
 	errs := []error{}
 	webhooks = getFilteredWebhooks(webhooks, record.Organization, record.Action)
+
 	for _, webhook := range webhooks {
+		record2 := *record
+
+		if len(webhook.ObjectFields) != 0 && webhook.ObjectFields[0] != "All" {
+			record2.Object = filterRecordObject(record.Object, webhook.ObjectFields)
+		}
+
 		var user *User
 		if webhook.IsUserExtended {
 			user, err = getUser(record.Organization, record.User)
 			if err != nil {
-				errs = append(errs, err)
+				errs = append(errs, fmt.Errorf("webhook %s: failed to get user: %w", webhook.GetId(), err))
 				continue
 			}
 
 			user, err = GetMaskedUser(user, false, err)
 			if err != nil {
-				errs = append(errs, err)
+				errs = append(errs, fmt.Errorf("webhook %s: failed to mask user: %w", webhook.GetId(), err))
 				continue
 			}
 		}
 
-		statusCode, respBody, err := sendWebhook(webhook, record, user)
+		// Create webhook event for tracking and retry
+		_, err = CreateWebhookEventFromRecord(webhook, &record2, user)
 		if err != nil {
-			errs = append(errs, err)
+			errs = append(errs, fmt.Errorf("webhook %s: failed to create event: %w", webhook.GetId(), err))
+			continue
 		}
 
-		err = addWebhookRecord(webhook, record, statusCode, respBody, err)
-		if err != nil {
-			errs = append(errs, err)
-		}
-
+		// The webhook will be delivered by the background worker
+		// This provides automatic retry and replay capability
 	}
 
 	if len(errs) > 0 {
@@ -304,7 +393,7 @@ func SendWebhooks(record *casvisorsdk.Record) error {
 		for _, err := range errs {
 			errStrings = append(errStrings, err.Error())
 		}
-		return fmt.Errorf(strings.Join(errStrings, " | "))
+		return errors.New(strings.Join(errStrings, " | "))
 	}
 	return nil
 }

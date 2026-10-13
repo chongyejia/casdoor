@@ -15,6 +15,8 @@
 package object
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -24,21 +26,34 @@ import (
 )
 
 type HttpSmsClient struct {
-	endpoint  string
-	method    string
-	paramName string
-	template  string
+	endpoint    string
+	method      string
+	paramName   string
+	template    string
+	httpHeaders map[string]string
+	bodyMapping map[string]string
+	contentType string
+	enableProxy bool
+	httpClient  *http.Client
 }
 
-func newHttpSmsClient(endpoint, method, paramName, template string) (*HttpSmsClient, error) {
+func newHttpSmsClient(endpoint, method, paramName, template string, httpHeaders map[string]string, bodyMapping map[string]string, contentType string, enableProxy bool, httpClient *http.Client) (*HttpSmsClient, error) {
 	if template == "" {
 		template = "%s"
 	}
+	if contentType == "" {
+		contentType = "application/x-www-form-urlencoded"
+	}
 	client := &HttpSmsClient{
-		endpoint:  endpoint,
-		method:    method,
-		paramName: paramName,
-		template:  template,
+		endpoint:    endpoint,
+		method:      method,
+		paramName:   paramName,
+		template:    template,
+		httpHeaders: httpHeaders,
+		bodyMapping: bodyMapping,
+		contentType: contentType,
+		enableProxy: enableProxy,
+		httpClient:  httpClient,
 	}
 	return client, nil
 }
@@ -48,33 +63,85 @@ func (c *HttpSmsClient) SendMessage(param map[string]string, targetPhoneNumber .
 	code := param["code"]
 	content := fmt.Sprintf(c.template, code)
 
+	phoneNumberField := "phoneNumber"
+	contentField := c.paramName
+	for k, v := range c.bodyMapping {
+		switch k {
+		case "phoneNumber":
+			phoneNumberField = v
+		case "content":
+			if contentField == "" {
+				contentField = v
+			}
+		}
+	}
+
+	// Replace {mobile} and {code} placeholders in the endpoint URL
+	endpoint := c.endpoint
+	hasMobilePlaceholder := strings.Contains(endpoint, "{mobile}")
+	hasCodePlaceholder := strings.Contains(endpoint, "{code}")
+	if hasMobilePlaceholder {
+		endpoint = strings.ReplaceAll(endpoint, "{mobile}", phoneNumber)
+	}
+	if hasCodePlaceholder {
+		endpoint = strings.ReplaceAll(endpoint, "{code}", code)
+	}
+
 	var req *http.Request
 	var err error
-	if c.method == "POST" {
-		formValues := url.Values{}
-		formValues.Set("phoneNumber", phoneNumber)
-		formValues.Set(c.paramName, content)
-		req, err = http.NewRequest(c.method, c.endpoint, strings.NewReader(formValues.Encode()))
+	if c.method == "POST" || c.method == "PUT" || c.method == "DELETE" {
+		bodyMap := make(map[string]string)
+		bodyMap[phoneNumberField] = phoneNumber
+		bodyMap[contentField] = content
+
+		var bodyBytes []byte
+		if c.contentType == "application/json" {
+			bodyBytes, err = json.Marshal(bodyMap)
+			if err != nil {
+				return err
+			}
+			req, err = http.NewRequest(c.method, endpoint, bytes.NewBuffer(bodyBytes))
+		} else {
+			formValues := url.Values{}
+			for k, v := range bodyMap {
+				formValues.Add(k, v)
+			}
+			req, err = http.NewRequest(c.method, endpoint, strings.NewReader(formValues.Encode()))
+		}
+
 		if err != nil {
 			return err
 		}
 
-		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		req.Header.Set("Content-Type", c.contentType)
 	} else if c.method == "GET" {
-		req, err = http.NewRequest(c.method, c.endpoint, nil)
+		req, err = http.NewRequest(c.method, endpoint, nil)
 		if err != nil {
 			return err
 		}
 
-		q := req.URL.Query()
-		q.Add("phoneNumber", phoneNumber)
-		q.Add(c.paramName, content)
-		req.URL.RawQuery = q.Encode()
+		// Only append extra query params if the endpoint doesn't already use placeholders
+		if !hasMobilePlaceholder && !hasCodePlaceholder {
+			q := req.URL.Query()
+			q.Add(phoneNumberField, phoneNumber)
+			q.Add(contentField, content)
+			req.URL.RawQuery = q.Encode()
+		}
 	} else {
 		return fmt.Errorf("HttpSmsClient's SendMessage() error, unsupported method: %s", c.method)
 	}
 
+	for k, v := range c.httpHeaders {
+		req.Header.Set(k, v)
+	}
+
 	httpClient := proxy.DefaultHttpClient
+	if c.enableProxy {
+		httpClient = proxy.ProxyHttpClient
+	}
+	if c.httpClient != nil {
+		httpClient = c.httpClient
+	}
 	resp, err := httpClient.Do(req)
 	if err != nil {
 		return err

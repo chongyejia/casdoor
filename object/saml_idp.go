@@ -26,18 +26,20 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
+	"strings"
 	"time"
 
 	"github.com/beevik/etree"
-	"github.com/golang-jwt/jwt/v4"
-	"github.com/google/uuid"
+	"github.com/casdoor/casdoor/util"
+	"github.com/golang-jwt/jwt/v5"
 	saml "github.com/russellhaering/gosaml2"
 	dsig "github.com/russellhaering/goxmldsig"
 )
 
 // NewSamlResponse
 // returns a saml2 response
-func NewSamlResponse(application *Application, user *User, host string, certificate string, destination string, iss string, requestId string, redirectUri []string) (*etree.Element, error) {
+func NewSamlResponse(application *Application, user *User, host string, certificate string, destination string, iss string, requestId string, sessionIndex string, redirectUri []string) (*etree.Element, error) {
 	samlResponse := &etree.Element{
 		Space: "samlp",
 		Tag:   "Response",
@@ -46,30 +48,41 @@ func NewSamlResponse(application *Application, user *User, host string, certific
 	expireTime := time.Now().UTC().Add(time.Hour * 24).Format(time.RFC3339)
 	samlResponse.CreateAttr("xmlns:samlp", "urn:oasis:names:tc:SAML:2.0:protocol")
 	samlResponse.CreateAttr("xmlns:saml", "urn:oasis:names:tc:SAML:2.0:assertion")
-	arId := uuid.New()
+	samlResponse.CreateAttr("xmlns:xsi", "http://www.w3.org/2001/XMLSchema-instance")
+	samlResponse.CreateAttr("xmlns:xs", "http://www.w3.org/2001/XMLSchema")
+	arId := util.GenerateUUID()
 
 	samlResponse.CreateAttr("ID", fmt.Sprintf("_%s", arId))
 	samlResponse.CreateAttr("Version", "2.0")
 	samlResponse.CreateAttr("IssueInstant", now)
 	samlResponse.CreateAttr("Destination", destination)
-	samlResponse.CreateAttr("InResponseTo", requestId)
+	// the "InResponseTo" attribute must be omitted for IdP-initiated SSO, as there is no AuthnRequest to respond to
+	if requestId != "" {
+		samlResponse.CreateAttr("InResponseTo", requestId)
+	}
 	samlResponse.CreateElement("saml:Issuer").SetText(host)
 
 	samlResponse.CreateElement("samlp:Status").CreateElement("samlp:StatusCode").CreateAttr("Value", "urn:oasis:names:tc:SAML:2.0:status:Success")
 
 	assertion := samlResponse.CreateElement("saml:Assertion")
+	assertion.CreateAttr("xmlns:saml", "urn:oasis:names:tc:SAML:2.0:assertion")
 	assertion.CreateAttr("xmlns:xsi", "http://www.w3.org/2001/XMLSchema-instance")
 	assertion.CreateAttr("xmlns:xs", "http://www.w3.org/2001/XMLSchema")
-	assertion.CreateAttr("ID", fmt.Sprintf("_%s", uuid.New()))
+	assertion.CreateAttr("ID", fmt.Sprintf("_%s", util.GenerateUUID()))
 	assertion.CreateAttr("Version", "2.0")
 	assertion.CreateAttr("IssueInstant", now)
 	assertion.CreateElement("saml:Issuer").SetText(host)
 	subject := assertion.CreateElement("saml:Subject")
-	subject.CreateElement("saml:NameID").SetText(user.Name)
+	nameIdValue, nameIdFormat := getSamlNameId(application, user)
+	nameId := subject.CreateElement("saml:NameID")
+	nameId.CreateAttr("Format", nameIdFormat)
+	nameId.SetText(nameIdValue)
 	subjectConfirmation := subject.CreateElement("saml:SubjectConfirmation")
 	subjectConfirmation.CreateAttr("Method", "urn:oasis:names:tc:SAML:2.0:cm:bearer")
 	subjectConfirmationData := subjectConfirmation.CreateElement("saml:SubjectConfirmationData")
-	subjectConfirmationData.CreateAttr("InResponseTo", requestId)
+	if requestId != "" {
+		subjectConfirmationData.CreateAttr("InResponseTo", requestId)
+	}
 	subjectConfirmationData.CreateAttr("Recipient", destination)
 	subjectConfirmationData.CreateAttr("NotOnOrAfter", expireTime)
 	condition := assertion.CreateElement("saml:Conditions")
@@ -77,52 +90,70 @@ func NewSamlResponse(application *Application, user *User, host string, certific
 	condition.CreateAttr("NotOnOrAfter", expireTime)
 	audience := condition.CreateElement("saml:AudienceRestriction")
 	audience.CreateElement("saml:Audience").SetText(iss)
+	// Add redirect URIs as audiences, but skip duplicates and empty values
 	for _, value := range redirectUri {
-		audience.CreateElement("saml:Audience").SetText(value)
+		if value != "" && value != iss {
+			audience.CreateElement("saml:Audience").SetText(value)
+		}
 	}
 	authnStatement := assertion.CreateElement("saml:AuthnStatement")
 	authnStatement.CreateAttr("AuthnInstant", now)
-	authnStatement.CreateAttr("SessionIndex", fmt.Sprintf("_%s", uuid.New()))
+	authnStatement.CreateAttr("SessionIndex", sessionIndex)
 	authnStatement.CreateAttr("SessionNotOnOrAfter", expireTime)
 	authnStatement.CreateElement("saml:AuthnContext").CreateElement("saml:AuthnContextClassRef").SetText("urn:oasis:names:tc:SAML:2.0:ac:classes:PasswordProtectedTransport")
 
-	attributes := assertion.CreateElement("saml:AttributeStatement")
+	if !application.DisableSamlAttributes {
+		attributes := assertion.CreateElement("saml:AttributeStatement")
 
-	email := attributes.CreateElement("saml:Attribute")
-	email.CreateAttr("Name", "Email")
-	email.CreateAttr("NameFormat", "urn:oasis:names:tc:SAML:2.0:attrname-format:basic")
-	email.CreateElement("saml:AttributeValue").CreateAttr("xsi:type", "xs:string").Element().SetText(user.Email)
+		email := attributes.CreateElement("saml:Attribute")
+		email.CreateAttr("Name", "Email")
+		email.CreateAttr("NameFormat", "urn:oasis:names:tc:SAML:2.0:attrname-format:basic")
+		email.CreateElement("saml:AttributeValue").CreateAttr("xsi:type", "xs:string").Element().SetText(user.Email)
 
-	name := attributes.CreateElement("saml:Attribute")
-	name.CreateAttr("Name", "Name")
-	name.CreateAttr("NameFormat", "urn:oasis:names:tc:SAML:2.0:attrname-format:basic")
-	name.CreateElement("saml:AttributeValue").CreateAttr("xsi:type", "xs:string").Element().SetText(user.Name)
+		name := attributes.CreateElement("saml:Attribute")
+		name.CreateAttr("Name", "Name")
+		name.CreateAttr("NameFormat", "urn:oasis:names:tc:SAML:2.0:attrname-format:basic")
+		name.CreateElement("saml:AttributeValue").CreateAttr("xsi:type", "xs:string").Element().SetText(user.Name)
 
-	displayName := attributes.CreateElement("saml:Attribute")
-	displayName.CreateAttr("Name", "DisplayName")
-	displayName.CreateAttr("NameFormat", "urn:oasis:names:tc:SAML:2.0:attrname-format:basic")
-	displayName.CreateElement("saml:AttributeValue").CreateAttr("xsi:type", "xs:string").Element().SetText(user.DisplayName)
+		displayName := attributes.CreateElement("saml:Attribute")
+		displayName.CreateAttr("Name", "DisplayName")
+		displayName.CreateAttr("NameFormat", "urn:oasis:names:tc:SAML:2.0:attrname-format:basic")
+		displayName.CreateElement("saml:AttributeValue").CreateAttr("xsi:type", "xs:string").Element().SetText(user.DisplayName)
 
-	for _, item := range application.SamlAttributes {
-		role := attributes.CreateElement("saml:Attribute")
-		role.CreateAttr("Name", item.Name)
-		role.CreateAttr("NameFormat", item.NameFormat)
-		role.CreateElement("saml:AttributeValue").CreateAttr("xsi:type", "xs:string").Element().SetText(item.Value)
-	}
+		err := ExtendUserWithRolesAndPermissions(user)
+		if err != nil {
+			return nil, err
+		}
 
-	roles := attributes.CreateElement("saml:Attribute")
-	roles.CreateAttr("Name", "Roles")
-	roles.CreateAttr("NameFormat", "urn:oasis:names:tc:SAML:2.0:attrname-format:basic")
-	err := ExtendUserWithRolesAndPermissions(user)
-	if err != nil {
-		return nil, err
-	}
+		for _, item := range application.SamlAttributes {
+			role := attributes.CreateElement("saml:Attribute")
+			role.CreateAttr("Name", item.Name)
+			role.CreateAttr("NameFormat", item.NameFormat)
 
-	for _, role := range user.Roles {
-		roles.CreateElement("saml:AttributeValue").CreateAttr("xsi:type", "xs:string").Element().SetText(role.Name)
+			valueList := replaceAttributeValue(user, item.Value)
+			for _, value := range valueList {
+				av := role.CreateElement("saml:AttributeValue")
+				av.CreateAttr("xsi:type", "xs:string").Element().SetText(value)
+			}
+		}
+
+		roles := attributes.CreateElement("saml:Attribute")
+		roles.CreateAttr("Name", "Roles")
+		roles.CreateAttr("NameFormat", "urn:oasis:names:tc:SAML:2.0:attrname-format:basic")
+
+		for _, role := range user.Roles {
+			roles.CreateElement("saml:AttributeValue").CreateAttr("xsi:type", "xs:string").Element().SetText(role.Name)
+		}
 	}
 
 	return samlResponse, nil
+}
+
+func getSamlNameId(application *Application, user *User) (string, string) {
+	if application.UseEmailAsSamlNameId {
+		return user.Email, "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress"
+	}
+	return user.Name, "urn:oasis:names:tc:SAML:1.1:nameid-format:unspecified"
 }
 
 type X509Key struct {
@@ -173,9 +204,10 @@ type IdpSSODescriptor struct {
 	XMLName                    xml.Name `xml:"urn:oasis:names:tc:SAML:2.0:metadata IDPSSODescriptor"`
 	ProtocolSupportEnumeration string   `xml:"protocolSupportEnumeration,attr"`
 	SigningKeyDescriptor       KeyDescriptor
-	NameIDFormats              []NameIDFormat      `xml:"NameIDFormat"`
-	SingleSignOnService        SingleSignOnService `xml:"SingleSignOnService"`
-	Attribute                  []Attribute         `xml:"Attribute"`
+	SingleLogoutServices       []SingleLogoutService `xml:"SingleLogoutService"`
+	NameIDFormats              []NameIDFormat        `xml:"NameIDFormat"`
+	SingleSignOnService        SingleSignOnService   `xml:"SingleSignOnService"`
+	Attribute                  []Attribute           `xml:"Attribute"`
 }
 
 type NameIDFormat struct {
@@ -184,17 +216,22 @@ type NameIDFormat struct {
 }
 
 type SingleSignOnService struct {
-	XMLName  xml.Name
+	// XMLName  xml.Name
+	Binding  string `xml:"Binding,attr"`
+	Location string `xml:"Location,attr"`
+}
+
+type SingleLogoutService struct {
 	Binding  string `xml:"Binding,attr"`
 	Location string `xml:"Location,attr"`
 }
 
 type Attribute struct {
 	// XMLName      xml.Name
+	Xmlns        string   `xml:"xmlns,attr"`
 	Name         string   `xml:"Name,attr"`
 	NameFormat   string   `xml:"NameFormat,attr"`
 	FriendlyName string   `xml:"FriendlyName,attr"`
-	Xmlns        string   `xml:"xmlns,attr"`
 	Values       []string `xml:"AttributeValue"`
 }
 
@@ -218,11 +255,16 @@ func GetSamlMeta(application *Application, host string, enablePostBinding bool) 
 	originFrontend, originBackend := getOriginFromHost(host)
 
 	idpLocation := ""
+	idpBinding := ""
 	if enablePostBinding {
 		idpLocation = fmt.Sprintf("%s/api/saml/redirect/%s/%s", originBackend, application.Owner, application.Name)
+		idpBinding = "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST"
 	} else {
 		idpLocation = fmt.Sprintf("%s/login/saml/authorize/%s/%s", originFrontend, application.Owner, application.Name)
+		idpBinding = "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect"
 	}
+
+	sloLocation := getSamlSingleLogoutLocation(application, host)
 
 	d := IdpEntityDescriptor{
 		XMLName: xml.Name{
@@ -243,6 +285,10 @@ func GetSamlMeta(application *Application, host string, enablePostBinding bool) 
 					},
 				},
 			},
+			SingleLogoutServices: []SingleLogoutService{
+				{Binding: samlRedirectBinding, Location: sloLocation},
+				{Binding: samlPostBinding, Location: sloLocation},
+			},
 			NameIDFormats: []NameIDFormat{
 				{Value: "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress"},
 				{Value: "urn:oasis:names:tc:SAML:2.0:nameid-format:persistent"},
@@ -254,7 +300,7 @@ func GetSamlMeta(application *Application, host string, enablePostBinding bool) 
 				{Xmlns: "urn:oasis:names:tc:SAML:2.0:assertion", Name: "Name", NameFormat: "urn:oasis:names:tc:SAML:2.0:attrname-format:basic", FriendlyName: "Name"},
 			},
 			SingleSignOnService: SingleSignOnService{
-				Binding:  "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-Redirect",
+				Binding:  idpBinding,
 				Location: idpLocation,
 			},
 			ProtocolSupportEnumeration: "urn:oasis:names:tc:SAML:2.0:protocol",
@@ -264,41 +310,119 @@ func GetSamlMeta(application *Application, host string, enablePostBinding bool) 
 	return &d, nil
 }
 
-// GetSamlResponse generates a SAML2.0 response
-// parameter samlRequest is saml request in base64 format
-func GetSamlResponse(application *Application, user *User, samlRequest string, host string) (string, string, string, error) {
-	// request type
-	method := "GET"
-
-	// base64 decode
-	defated, err := base64.StdEncoding.DecodeString(samlRequest)
+// decodeSamlMessage decodes a base64 SAML message, which is also deflated when it comes over the HTTP-Redirect binding
+func decodeSamlMessage(message string) ([]byte, error) {
+	message = strings.ReplaceAll(message, " ", "+")
+	defated, err := base64.StdEncoding.DecodeString(message)
 	if err != nil {
-		return "", "", "", fmt.Errorf("err: Failed to decode SAML request, %s", err.Error())
+		return nil, fmt.Errorf("err: Failed to decode SAML request, %s", err.Error())
 	}
 
-	// decompress
+	if strings.Contains(string(defated), "xmlns:") {
+		return defated, nil
+	}
+
 	var buffer bytes.Buffer
 	rdr := flate.NewReader(bytes.NewReader(defated))
-
 	for {
 		_, err = io.CopyN(&buffer, rdr, 1024)
 		if err != nil {
 			if err == io.EOF {
 				break
 			}
-			return "", "", "", err
+			return nil, err
 		}
 	}
 
+	return buffer.Bytes(), nil
+}
+
+// getAuthnRequest parses the AuthnRequest sent by the SP, parameter samlRequest is the SAML request in base64 format
+func getAuthnRequest(application *Application, samlRequest string) (saml.AuthNRequest, error) {
 	var authnRequest saml.AuthNRequest
-	err = xml.Unmarshal(buffer.Bytes(), &authnRequest)
+
+	requestByte, err := decodeSamlMessage(samlRequest)
 	if err != nil {
-		return "", "", "", fmt.Errorf("err: Failed to unmarshal AuthnRequest, please check the SAML request, %s", err.Error())
+		return authnRequest, err
+	}
+
+	err = xml.Unmarshal(requestByte, &authnRequest)
+	if err != nil {
+		return authnRequest, fmt.Errorf("err: Failed to unmarshal AuthnRequest, please check the SAML request, %s", err.Error())
 	}
 
 	// verify samlRequest
 	if isValid := application.IsRedirectUriValid(authnRequest.Issuer); !isValid {
-		return "", "", "", fmt.Errorf("err: Issuer URI: %s doesn't exist in the allowed Redirect URI list", authnRequest.Issuer)
+		return authnRequest, fmt.Errorf("err: Issuer URI: %s doesn't exist in the allowed Redirect URI list", authnRequest.Issuer)
+	}
+
+	return authnRequest, nil
+}
+
+// isSamlAcsUrlValid checks the ACS URL of an AuthnRequest, which isn't signed: the signed
+// assertion is posted there, so it must be a registered URL or on the host of one of them
+func (application *Application) isSamlAcsUrlValid(acsUrl string) bool {
+	if application.IsRedirectUriValid(acsUrl) {
+		return true
+	}
+
+	acsUrlObj, err := url.Parse(acsUrl)
+	if err != nil || acsUrlObj.Host == "" {
+		return false
+	}
+
+	for _, redirectUri := range application.RedirectUris {
+		redirectUriObj, err := url.Parse(redirectUri)
+		if err == nil && redirectUriObj.Host != "" && redirectUriObj.Scheme == acsUrlObj.Scheme && redirectUriObj.Host == acsUrlObj.Host {
+			return true
+		}
+	}
+	return false
+}
+
+// getIdpInitiatedAuthnRequest builds the AuthnRequest for IdP-initiated SSO, where the SP doesn't send any AuthnRequest to Casdoor,
+// so the ACS URL and the SP's entity ID are taken from the application's SAML config instead
+func getIdpInitiatedAuthnRequest(application *Application) (saml.AuthNRequest, error) {
+	var authnRequest saml.AuthNRequest
+
+	if application.SamlReplyUrl == "" {
+		return authnRequest, fmt.Errorf("err: the SAML reply URL should not be empty for IdP-initiated SSO")
+	}
+
+	entityId := ""
+	for _, redirectUri := range application.RedirectUris {
+		if redirectUri != "" {
+			entityId = redirectUri
+			break
+		}
+	}
+	if entityId == "" {
+		return authnRequest, fmt.Errorf("err: the Redirect URIs should contain the SP's entity ID for IdP-initiated SSO")
+	}
+
+	authnRequest.AssertionConsumerServiceURL = application.SamlReplyUrl
+	authnRequest.Issuer = entityId
+	authnRequest.ProtocolBinding = "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST"
+
+	return authnRequest, nil
+}
+
+// GetSamlResponse generates a SAML2.0 response
+// parameter samlRequest is saml request in base64 format, it is empty for IdP-initiated SSO
+// parameter sessionId is the Casdoor session the SP signs in with, SAML Single Logout ends it again
+func GetSamlResponse(application *Application, user *User, samlRequest string, host string, sessionId string) (string, string, string, error) {
+	// request type
+	method := "GET"
+
+	var authnRequest saml.AuthNRequest
+	var err error
+	if samlRequest == "" {
+		authnRequest, err = getIdpInitiatedAuthnRequest(application)
+	} else {
+		authnRequest, err = getAuthnRequest(application, samlRequest)
+	}
+	if err != nil {
+		return "", "", "", err
 	}
 
 	// get certificate string
@@ -320,32 +444,44 @@ func GetSamlResponse(application *Application, user *User, samlRequest string, h
 		authnRequest.AssertionConsumerServiceURL = application.SamlReplyUrl
 	} else if authnRequest.AssertionConsumerServiceURL == "" {
 		return "", "", "", fmt.Errorf("err: SAML request don't has attribute 'AssertionConsumerServiceURL' in <samlp:AuthnRequest>")
+	} else if !application.isSamlAcsUrlValid(authnRequest.AssertionConsumerServiceURL) {
+		return "", "", "", fmt.Errorf("err: AssertionConsumerServiceURL: %s doesn't match the SAML reply URL or the allowed Redirect URI list", authnRequest.AssertionConsumerServiceURL)
+	}
+	if authnRequest.ProtocolBinding == "urn:oasis:names:tc:SAML:2.0:bindings:HTTP-POST" {
+		method = "POST"
 	}
 
 	_, originBackend := getOriginFromHost(host)
 
 	// build signedResponse
-	samlResponse, err := NewSamlResponse(application, user, originBackend, certificate, authnRequest.AssertionConsumerServiceURL, authnRequest.Issuer, authnRequest.ID, application.RedirectUris)
+	sessionIndex := fmt.Sprintf("_%s", util.GenerateUUID())
+	samlResponse, err := NewSamlResponse(application, user, originBackend, certificate, authnRequest.AssertionConsumerServiceURL, authnRequest.Issuer, authnRequest.ID, sessionIndex, application.RedirectUris)
 	if err != nil {
 		return "", "", "", fmt.Errorf("err: NewSamlResponse() error, %s", err.Error())
 	}
 
-	randomKeyStore := &X509Key{
-		PrivateKey:      cert.PrivateKey,
-		X509Certificate: certificate,
-	}
-	ctx := dsig.NewDefaultSigningContext(randomKeyStore)
-	ctx.Hash = crypto.SHA1
-
-	if application.EnableSamlC14n10 {
-		ctx.Canonicalizer = dsig.MakeC14N10ExclusiveCanonicalizerWithPrefixList("")
-	}
+	ctx := newSamlSigningContext(application, cert.PrivateKey, certificate)
 
 	// signedXML, err := ctx.SignEnvelopedLimix(samlResponse)
 	// if err != nil {
 	//	return "", "", fmt.Errorf("err: %s", err.Error())
 	// }
 
+	// Sign the assertion (SAML 2.0 best practice)
+	// Only sign if EnableSamlAssertionSignature is true
+	if application.EnableSamlAssertionSignature {
+		assertion := samlResponse.FindElement("./Assertion")
+		if assertion != nil {
+			assertionSig, err := ctx.ConstructSignature(assertion, true)
+			if err != nil {
+				return "", "", "", fmt.Errorf("err: Failed to sign SAML assertion, %s", err.Error())
+			}
+			// Insert signature as the second child of assertion (after Issuer)
+			assertion.InsertChildAt(1, assertionSig)
+		}
+	}
+
+	// Sign the response
 	sig, err := ctx.ConstructSignature(samlResponse, true)
 	if err != nil {
 		return "", "", "", fmt.Errorf("err: Failed to serializes the SAML request into bytes, %s", err.Error())
@@ -355,6 +491,8 @@ func GetSamlResponse(application *Application, user *User, samlRequest string, h
 
 	doc := etree.NewDocument()
 	doc.SetRoot(samlResponse)
+
+	// Write to bytes
 	xmlBytes, err := doc.WriteToBytes()
 	if err != nil {
 		return "", "", "", fmt.Errorf("err: Failed to serializes the SAML request into bytes, %s", err.Error())
@@ -380,13 +518,47 @@ func GetSamlResponse(application *Application, user *User, samlRequest string, h
 
 		xmlBytes = flated.Bytes()
 	}
+	nameIdValue, nameIdFormat := getSamlNameId(application, user)
+	err = addSamlSession(&SamlSession{
+		Owner:        user.Owner,
+		Name:         user.Name,
+		SessionIndex: sessionIndex,
+		Application:  application.GetId(),
+		SessionId:    sessionId,
+		NameId:       nameIdValue,
+		NameIdFormat: nameIdFormat,
+		SpEntityId:   authnRequest.Issuer,
+	})
+	if err != nil {
+		return "", "", "", err
+	}
+
 	// base64 encode
 	res := base64.StdEncoding.EncodeToString(xmlBytes)
 	return res, authnRequest.AssertionConsumerServiceURL, method, err
 }
 
+func newSamlSigningContext(application *Application, privateKey string, certificate string) *dsig.SigningContext {
+	ctx := dsig.NewDefaultSigningContext(&X509Key{
+		PrivateKey:      privateKey,
+		X509Certificate: certificate,
+	})
+	if application.SamlHashAlgorithm == "" || application.SamlHashAlgorithm == "SHA1" {
+		ctx.Hash = crypto.SHA1
+	} else if application.SamlHashAlgorithm == "SHA256" {
+		ctx.Hash = crypto.SHA256
+	} else if application.SamlHashAlgorithm == "SHA512" {
+		ctx.Hash = crypto.SHA512
+	}
+
+	if application.EnableSamlC14n10 {
+		ctx.Canonicalizer = dsig.MakeC14N10ExclusiveCanonicalizerWithPrefixList(application.SamlC14nPrefix)
+	}
+	return ctx
+}
+
 // NewSamlResponse11 return a saml1.1 response(not 2.0)
-func NewSamlResponse11(user *User, requestID string, host string) (*etree.Element, error) {
+func NewSamlResponse11(application *Application, user *User, requestID string, host string) (*etree.Element, error) {
 	samlResponse := &etree.Element{
 		Space: "samlp",
 		Tag:   "Response",
@@ -396,7 +568,7 @@ func NewSamlResponse11(user *User, requestID string, host string) (*etree.Elemen
 	samlResponse.CreateAttr("MajorVersion", "1")
 	samlResponse.CreateAttr("MinorVersion", "1")
 
-	responseID := uuid.New()
+	responseID := util.GenerateUUID()
 	samlResponse.CreateAttr("ResponseID", fmt.Sprintf("_%s", responseID))
 	samlResponse.CreateAttr("InResponseTo", requestID)
 
@@ -412,7 +584,7 @@ func NewSamlResponse11(user *User, requestID string, host string) (*etree.Elemen
 	assertion.CreateAttr("xmlns:saml", "urn:oasis:names:tc:SAML:1.0:assertion")
 	assertion.CreateAttr("MajorVersion", "1")
 	assertion.CreateAttr("MinorVersion", "1")
-	assertion.CreateAttr("AssertionID", uuid.New().String())
+	assertion.CreateAttr("AssertionID", util.GenerateUUID())
 	assertion.CreateAttr("Issuer", host)
 	assertion.CreateAttr("IssueInstant", now)
 
@@ -430,7 +602,11 @@ func NewSamlResponse11(user *User, requestID string, host string) (*etree.Elemen
 	// nameIdentifier inside subject
 	nameIdentifier := subject.CreateElement("saml:NameIdentifier")
 	// nameIdentifier.CreateAttr("Format", "urn:oasis:names:tc:SAML:1.1:nameid-format:emailAddress")
-	nameIdentifier.SetText(user.Name)
+	if application.UseEmailAsSamlNameId {
+		nameIdentifier.SetText(user.Email)
+	} else {
+		nameIdentifier.SetText(user.Name)
+	}
 
 	// subjectConfirmation inside subject
 	subjectConfirmation := subject.CreateElement("saml:SubjectConfirmation")
@@ -439,7 +615,11 @@ func NewSamlResponse11(user *User, requestID string, host string) (*etree.Elemen
 	attributeStatement := assertion.CreateElement("saml:AttributeStatement")
 	subjectInAttribute := attributeStatement.CreateElement("saml:Subject")
 	nameIdentifierInAttribute := subjectInAttribute.CreateElement("saml:NameIdentifier")
-	nameIdentifierInAttribute.SetText(user.Name)
+	if application.UseEmailAsSamlNameId {
+		nameIdentifierInAttribute.SetText(user.Email)
+	} else {
+		nameIdentifierInAttribute.SetText(user.Name)
+	}
 
 	subjectConfirmationInAttribute := subjectInAttribute.CreateElement("saml:SubjectConfirmation")
 	subjectConfirmationInAttribute.CreateElement("saml:ConfirmationMethod").SetText("urn:oasis:names:tc:SAML:1.0:cm:artifact")
@@ -467,7 +647,14 @@ func NewSamlResponse11(user *User, requestID string, host string) (*etree.Elemen
 	return samlResponse, nil
 }
 
-func GetSamlRedirectAddress(owner string, application string, relayState string, samlRequest string, host string) string {
+func GetSamlRedirectAddress(owner string, application string, relayState string, samlRequest string, host string, username string, loginHint string) string {
 	originF, _ := getOriginFromHost(host)
-	return fmt.Sprintf("%s/login/saml/authorize/%s/%s?relayState=%s&samlRequest=%s", originF, owner, application, relayState, samlRequest)
+	baseURL := fmt.Sprintf("%s/login/saml/authorize/%s/%s?relayState=%s&samlRequest=%s", originF, url.PathEscape(owner), url.PathEscape(application), relayState, url.QueryEscape(samlRequest))
+	if username != "" {
+		baseURL += fmt.Sprintf("&username=%s", url.QueryEscape(username))
+	}
+	if loginHint != "" {
+		baseURL += fmt.Sprintf("&login_hint=%s", url.QueryEscape(loginHint))
+	}
+	return baseURL
 }

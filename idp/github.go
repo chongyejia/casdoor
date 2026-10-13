@@ -188,10 +188,23 @@ type GitHubUserInfo struct {
 	} `json:"plan"`
 }
 
+type GitHubUserEmailInfo struct {
+	Email      string `json:"email"`
+	Primary    bool   `json:"primary"`
+	Verified   bool   `json:"verified"`
+	Visibility string `json:"visibility"`
+}
+
+type GitHubErrorInfo struct {
+	Message          string `json:"message"`
+	DocumentationUrl string `json:"documentation_url"`
+	Status           string `json:"status"`
+}
+
 func (idp *GithubIdProvider) GetUserInfo(token *oauth2.Token) (*UserInfo, error) {
 	req, err := http.NewRequest("GET", "https://api.github.com/user", nil)
 	if err != nil {
-		panic(err)
+		return nil, err
 	}
 	req.Header.Add("Authorization", "token "+token.AccessToken)
 	resp, err := idp.Client.Do(req)
@@ -212,12 +225,50 @@ func (idp *GithubIdProvider) GetUserInfo(token *oauth2.Token) (*UserInfo, error)
 		return nil, err
 	}
 
+	if githubUserInfo.Email == "" {
+		reqEmail, err := http.NewRequest("GET", "https://api.github.com/user/emails", nil)
+		if err != nil {
+			return nil, err
+		}
+		reqEmail.Header.Add("Authorization", "token "+token.AccessToken)
+		respEmail, err := idp.Client.Do(reqEmail)
+		if err != nil {
+			return nil, err
+		}
+
+		defer respEmail.Body.Close()
+		emailBody, err := io.ReadAll(respEmail.Body)
+		if err != nil {
+			return nil, err
+		}
+
+		if respEmail.StatusCode != 200 {
+			var errMessage GitHubErrorInfo
+			err = json.Unmarshal(emailBody, &errMessage)
+			if err != nil {
+				return nil, err
+			}
+
+			fmt.Printf("GithubIdProvider:GetUserInfo() error, status code = %d, error message = %v\n", respEmail.StatusCode, errMessage)
+		} else {
+			var userEmails []GitHubUserEmailInfo
+			err = json.Unmarshal(emailBody, &userEmails)
+			if err != nil {
+				return nil, err
+			}
+
+			githubUserInfo.Email = idp.getEmailFromEmailsResult(userEmails)
+		}
+	}
+
 	userInfo := UserInfo{
 		Id:          strconv.Itoa(githubUserInfo.Id),
 		Username:    githubUserInfo.Login,
 		DisplayName: githubUserInfo.Name,
 		Email:       githubUserInfo.Email,
-		AvatarUrl:   githubUserInfo.AvatarUrl,
+		// a public email must be verified on GitHub, and getEmailFromEmailsResult() only picks verified ones
+		EmailVerified: githubUserInfo.Email != "",
+		AvatarUrl:     githubUserInfo.AvatarUrl,
 	}
 	return &userInfo, nil
 }
@@ -247,4 +298,28 @@ func (idp *GithubIdProvider) postWithBody(body interface{}, url string) ([]byte,
 	}(resp.Body)
 
 	return data, nil
+}
+
+func (idp *GithubIdProvider) getEmailFromEmailsResult(emailInfo []GitHubUserEmailInfo) string {
+	primaryEmail := ""
+	verifiedEmail := ""
+
+	for _, addr := range emailInfo {
+		if !addr.Verified || strings.Contains(addr.Email, "users.noreply.github.com") {
+			continue
+		}
+
+		if addr.Primary {
+			primaryEmail = addr.Email
+			break
+		} else if verifiedEmail == "" {
+			verifiedEmail = addr.Email
+		}
+	}
+
+	if primaryEmail != "" {
+		return primaryEmail
+	}
+
+	return verifiedEmail
 }

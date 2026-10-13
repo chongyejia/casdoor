@@ -17,7 +17,7 @@ package controllers
 import (
 	"encoding/json"
 
-	"github.com/beego/beego/utils/pagination"
+	"github.com/beego/beego/v2/core/utils/pagination"
 	"github.com/casdoor/casdoor/object"
 	"github.com/casdoor/casdoor/util"
 )
@@ -31,14 +31,14 @@ import (
 // @router /get-webhooks [get]
 // @Security test_apiKey
 func (c *ApiController) GetWebhooks() {
-	owner := c.Input().Get("owner")
-	limit := c.Input().Get("pageSize")
-	page := c.Input().Get("p")
-	field := c.Input().Get("field")
-	value := c.Input().Get("value")
-	sortField := c.Input().Get("sortField")
-	sortOrder := c.Input().Get("sortOrder")
-	organization := c.Input().Get("organization")
+	owner := c.Ctx.Input.Query("owner")
+	limit := c.Ctx.Input.Query("pageSize")
+	page := c.Ctx.Input.Query("p")
+	field := c.Ctx.Input.Query("field")
+	value := c.Ctx.Input.Query("value")
+	sortField := c.Ctx.Input.Query("sortField")
+	sortOrder := c.Ctx.Input.Query("sortOrder")
+	organization := c.Ctx.Input.Query("organization")
 
 	if limit == "" || page == "" {
 		webhooks, err := object.GetWebhooks(owner, organization)
@@ -56,7 +56,7 @@ func (c *ApiController) GetWebhooks() {
 			return
 		}
 
-		paginator := pagination.SetPaginator(c.Ctx, limit, count)
+		paginator := pagination.NewPaginator(c.Ctx.Request, limit, count)
 
 		webhooks, err := object.GetPaginationWebhooks(owner, organization, paginator.Offset(), limit, field, value, sortField, sortOrder)
 		if err != nil {
@@ -76,9 +76,18 @@ func (c *ApiController) GetWebhooks() {
 // @Success 200 {object} object.Webhook The Response object
 // @router /get-webhook [get]
 func (c *ApiController) GetWebhook() {
-	id := c.Input().Get("id")
+	id := c.Ctx.Input.Query("id")
+	organization := c.Ctx.Input.Query("organization")
 
-	webhook, err := object.GetWebhook(id)
+	var webhook *object.Webhook
+	var err error
+	isGlobalAdmin, _ := c.isGlobalAdmin()
+	if !isGlobalAdmin {
+		webhook, err = object.GetWebhookByOrganization(id, organization)
+	} else {
+		webhook, err = object.GetWebhook(id)
+	}
+
 	if err != nil {
 		c.ResponseError(err.Error())
 		return
@@ -96,7 +105,7 @@ func (c *ApiController) GetWebhook() {
 // @Success 200 {object} controllers.Response The Response object
 // @router /update-webhook [post]
 func (c *ApiController) UpdateWebhook() {
-	id := c.Input().Get("id")
+	id := c.Ctx.Input.Query("id")
 
 	var webhook object.Webhook
 	err := json.Unmarshal(c.Ctx.Input.RequestBody, &webhook)
@@ -105,7 +114,13 @@ func (c *ApiController) UpdateWebhook() {
 		return
 	}
 
-	c.Data["json"] = wrapActionResponse(object.UpdateWebhook(id, &webhook))
+	if !c.IsGlobalAdmin() {
+		// a webhook with "singleOrgOnly" turned off receives the records of every
+		// organization, so only global admins are allowed to turn it off
+		webhook.SingleOrgOnly = true
+	}
+
+	c.Data["json"] = wrapActionResponse(object.UpdateWebhook(id, &webhook, c.IsGlobalAdmin(), c.GetAcceptLanguage()))
 	c.ServeJSON()
 }
 
@@ -122,6 +137,16 @@ func (c *ApiController) AddWebhook() {
 	if err != nil {
 		c.ResponseError(err.Error())
 		return
+	}
+
+	if !c.requireOrganizationPermission(webhook.Organization) {
+		return
+	}
+
+	if !c.IsGlobalAdmin() {
+		// a webhook with "singleOrgOnly" turned off receives the records of every
+		// organization, so only global admins are allowed to turn it off
+		webhook.SingleOrgOnly = true
 	}
 
 	c.Data["json"] = wrapActionResponse(object.AddWebhook(&webhook))

@@ -16,16 +16,22 @@ package routers
 
 import (
 	"compress/gzip"
+	stdcontext "context"
+	"errors"
 	"fmt"
+	"html"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 
-	"github.com/beego/beego/context"
+	"github.com/beego/beego/v2/core/logs"
+	"github.com/beego/beego/v2/server/web/context"
 	"github.com/casdoor/casdoor/conf"
+	"github.com/casdoor/casdoor/controllers"
 	"github.com/casdoor/casdoor/object"
 	"github.com/casdoor/casdoor/util"
 )
@@ -43,13 +49,29 @@ func getWebBuildFolder() string {
 		return path
 	}
 
+	if util.FileExist(filepath.Join(frontendBaseDir, "index.html")) {
+		return frontendBaseDir
+	}
+
 	path = filepath.Join(frontendBaseDir, "web/build")
+	if util.FileExist(filepath.Join(path, "index.html")) {
+		return path
+	}
+
+	casdoorDir := filepath.Join(filepath.Dir(frontendBaseDir), "casdoor")
+	if util.FileExist(filepath.Join(casdoorDir, "index.html")) {
+		return casdoorDir
+	}
+	if util.FileExist(filepath.Join(casdoorDir, "web/build", "index.html")) {
+		return filepath.Join(casdoorDir, "web/build")
+	}
+
 	return path
 }
 
 func fastAutoSignin(ctx *context.Context) (string, error) {
 	userId := getSessionUser(ctx)
-	if userId == "" {
+	if userId == "" || isSessionExpired(ctx) {
 		return "", nil
 	}
 
@@ -58,8 +80,9 @@ func fastAutoSignin(ctx *context.Context) (string, error) {
 	redirectUri := ctx.Input.Query("redirect_uri")
 	scope := ctx.Input.Query("scope")
 	state := ctx.Input.Query("state")
-	nonce := ""
+	nonce := ctx.Input.Query("nonce")
 	codeChallenge := ctx.Input.Query("code_challenge")
+	resource := ctx.Input.Query("resource")
 	if clientId == "" || responseType != "code" || redirectUri == "" {
 		return "", nil
 	}
@@ -76,19 +99,95 @@ func fastAutoSignin(ctx *context.Context) (string, error) {
 		return "", nil
 	}
 
-	code, err := object.GetOAuthCode(userId, clientId, responseType, redirectUri, scope, state, nonce, codeChallenge, ctx.Request.Host, getAcceptLanguage(ctx))
+	user, err := object.GetUser(userId)
+	if err != nil {
+		return "", err
+	}
+	if user == nil {
+		return "", nil
+	}
+
+	isAllowed, err := isFastAutoSigninAllowed(ctx, user, application)
+	if err != nil {
+		return "", err
+	}
+	if !isAllowed {
+		return "", nil
+	}
+
+	consentRequired, err := object.CheckConsentRequired(user, application, scope)
+	if err != nil {
+		return "", err
+	}
+
+	if consentRequired {
+		return "", nil
+	}
+
+	code, err := object.GetOAuthCode(userId, clientId, "", "autoSignin", responseType, redirectUri, scope, state, nonce, codeChallenge, resource, ctx.Input.CruSession.SessionID(stdcontext.Background()), ctx.Request.Host, getAcceptLanguage(ctx))
 	if err != nil {
 		return "", err
 	} else if code.Message != "" {
-		return "", fmt.Errorf(code.Message)
+		return "", errors.New(code.Message)
 	}
 
 	sep := "?"
 	if strings.Contains(redirectUri, "?") {
 		sep = "&"
 	}
-	res := fmt.Sprintf("%s%scode=%s&state=%s", redirectUri, sep, code.Code, state)
+	res := fmt.Sprintf("%s%scode=%s&state=%s", redirectUri, sep, url.QueryEscape(code.Code), url.QueryEscape(state))
 	return res, nil
+}
+
+func isFastAutoSigninAllowed(ctx *context.Context, user *object.User, application *object.Application) (bool, error) {
+	if user.NeedUpdatePassword {
+		return false, nil
+	}
+
+	err := object.CheckApplicationSignin(application, user, util.GetClientIpFromRequest(ctx.Request), getAcceptLanguage(ctx))
+	if err != nil {
+		return false, nil
+	}
+
+	organization, err := object.GetOrganizationByUser(user)
+	if err != nil {
+		return false, err
+	}
+	if object.IsNeedPromptMfa(organization, user) {
+		return false, nil
+	}
+
+	if user.Type == "paid-user" && !user.IsGlobalAdmin() && !user.IsAdmin {
+		return hasActiveSubscription(user)
+	}
+	return true, nil
+}
+
+func hasActiveSubscription(user *object.User) (bool, error) {
+	subscriptions, err := object.GetSubscriptionsByUser(user.Owner, user.Name)
+	if err != nil {
+		return false, err
+	}
+
+	for _, subscription := range subscriptions {
+		if subscription.State == object.SubStateActive {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func isSessionExpired(ctx *context.Context) bool {
+	session, ok := ctx.Input.Session("SessionData").(string)
+	if !ok {
+		return false
+	}
+
+	sessionData := &controllers.SessionData{}
+	if err := util.JsonToStruct(session, sessionData); err != nil {
+		return true
+	}
+	return sessionData.ExpireTime != 0 && sessionData.ExpireTime < time.Now().Unix()
 }
 
 func StaticFilter(ctx *context.Context) {
@@ -99,6 +198,12 @@ func StaticFilter(ctx *context.Context) {
 	}
 
 	if strings.HasPrefix(urlPath, "/api/") || strings.HasPrefix(urlPath, "/.well-known/") {
+		return
+	}
+	if serveAuthCallbackHandlerScript(ctx) {
+		return
+	}
+	if serveProviderHintRedirectScript(ctx) {
 		return
 	}
 	if strings.HasPrefix(urlPath, "/cas") && (strings.HasSuffix(urlPath, "/serviceValidate") || strings.HasSuffix(urlPath, "/proxy") || strings.HasSuffix(urlPath, "/proxyValidate") || strings.HasSuffix(urlPath, "/validate") || strings.HasSuffix(urlPath, "/p3/serviceValidate") || strings.HasSuffix(urlPath, "/p3/proxyValidate") || strings.HasSuffix(urlPath, "/samlValidate")) {
@@ -119,6 +224,14 @@ func StaticFilter(ctx *context.Context) {
 			http.Redirect(ctx.ResponseWriter, ctx.Request, redirectUrl, http.StatusFound)
 			return
 		}
+
+		if serveProviderHintRedirectPage(ctx) {
+			return
+		}
+	}
+
+	if serveAuthCallbackPage(ctx) {
+		return
 	}
 
 	webBuildFolder := getWebBuildFolder()
@@ -129,8 +242,22 @@ func StaticFilter(ctx *context.Context) {
 		path += urlPath
 	}
 
-	if strings.Contains(path, "/../") || !util.FileExist(path) {
+	// Preventing synchronization problems from concurrency
+	ctx.Input.CruSession = nil
+
+	organizationThemeCookie, err := appendThemeCookie(ctx, urlPath)
+	if err != nil {
+		fmt.Println(err)
+	}
+
+	if !filepath.IsLocal(strings.TrimPrefix(urlPath, "/")) || !util.FileExist(path) {
 		path = webBuildFolder + "/index.html"
+	}
+	if strings.HasSuffix(path, "/index.html") {
+		err = util.AppendWebConfigCookie(ctx)
+		if err != nil {
+			logs.Error("AppendWebConfigCookie failed in StaticFilter, error: %s", err)
+		}
 	}
 	if !util.FileExist(path) {
 		dir, err := os.Getwd()
@@ -145,13 +272,13 @@ func StaticFilter(ctx *context.Context) {
 	}
 
 	if oldStaticBaseUrl == newStaticBaseUrl {
-		makeGzipResponse(ctx.ResponseWriter, ctx.Request, path)
+		makeGzipResponse(ctx.ResponseWriter, ctx.Request, path, organizationThemeCookie)
 	} else {
-		serveFileWithReplace(ctx.ResponseWriter, ctx.Request, path)
+		serveFileWithReplace(ctx.ResponseWriter, ctx.Request, path, organizationThemeCookie)
 	}
 }
 
-func serveFileWithReplace(w http.ResponseWriter, r *http.Request, name string) {
+func serveFileWithReplace(w http.ResponseWriter, r *http.Request, name string, organizationThemeCookie *OrganizationThemeCookie) {
 	f, err := os.Open(filepath.Clean(name))
 	if err != nil {
 		panic(err)
@@ -164,7 +291,21 @@ func serveFileWithReplace(w http.ResponseWriter, r *http.Request, name string) {
 	}
 
 	oldContent := util.ReadStringFromPath(name)
-	newContent := strings.ReplaceAll(oldContent, oldStaticBaseUrl, newStaticBaseUrl)
+	newContent := oldContent
+	if organizationThemeCookie != nil {
+		newContent = strings.ReplaceAll(newContent, "https://cdn.casbin.org/img/favicon.png", html.EscapeString(organizationThemeCookie.Favicon))
+		newContent = strings.ReplaceAll(newContent, "<title>Casdoor</title>", fmt.Sprintf("<title>%s</title>", html.EscapeString(organizationThemeCookie.DisplayName)))
+	}
+
+	// Set the correct <html lang="..."> on the initial HTML response so browsers
+	// do not mis-detect the page language (e.g. Chrome offering to translate a
+	// Chinese page into Chinese because the static shell declares lang="en").
+	if strings.HasSuffix(name, "index.html") {
+		lang := getIndexHtmlLanguage(r)
+		newContent = strings.ReplaceAll(newContent, `<html lang="en">`, fmt.Sprintf(`<html lang="%s">`, lang))
+	}
+
+	newContent = strings.ReplaceAll(newContent, oldStaticBaseUrl, newStaticBaseUrl)
 
 	http.ServeContent(w, r, d.Name(), d.ModTime(), strings.NewReader(newContent))
 }
@@ -178,14 +319,14 @@ func (w gzipResponseWriter) Write(b []byte) (int, error) {
 	return w.Writer.Write(b)
 }
 
-func makeGzipResponse(w http.ResponseWriter, r *http.Request, path string) {
+func makeGzipResponse(w http.ResponseWriter, r *http.Request, path string, organizationThemeCookie *OrganizationThemeCookie) {
 	if !enableGzip || !strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
-		serveFileWithReplace(w, r, path)
+		serveFileWithReplace(w, r, path, organizationThemeCookie)
 		return
 	}
 	w.Header().Set("Content-Encoding", "gzip")
 	gz := gzip.NewWriter(w)
 	defer gz.Close()
 	gzw := gzipResponseWriter{Writer: gz, ResponseWriter: w}
-	serveFileWithReplace(gzw, r, path)
+	serveFileWithReplace(gzw, r, path, organizationThemeCookie)
 }

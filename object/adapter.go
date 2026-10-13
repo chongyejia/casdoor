@@ -41,6 +41,7 @@ type Adapter struct {
 	Database     string `xorm:"varchar(100)" json:"database"`
 
 	*xormadapter.Adapter `xorm:"-" json:"-"`
+	engine               *xorm.Engine
 }
 
 func GetAdapterCount(owner, field, value string) (int64, error) {
@@ -88,18 +89,24 @@ func getAdapter(owner, name string) (*Adapter, error) {
 }
 
 func GetAdapter(id string) (*Adapter, error) {
-	owner, name := util.GetOwnerAndNameFromId(id)
+	owner, name, err := util.GetOwnerAndNameFromIdWithError(id)
+	if err != nil {
+		return nil, err
+	}
 	return getAdapter(owner, name)
 }
 
 func UpdateAdapter(id string, adapter *Adapter) (bool, error) {
-	owner, name := util.GetOwnerAndNameFromId(id)
+	owner, name, err := util.GetOwnerAndNameFromIdWithError(id)
+	if err != nil {
+		return false, err
+	}
 	if adapter, err := getAdapter(owner, name); adapter == nil {
 		return false, err
 	}
 
 	if name != adapter.Name {
-		err := adapterChangeTrigger(name, adapter.Name)
+		err := adapterChangeTrigger(owner, name, adapter.Name)
 		if err != nil {
 			return false, err
 		}
@@ -140,7 +147,10 @@ func (adapter *Adapter) GetId() string {
 }
 
 func (adapter *Adapter) InitAdapter() error {
-	if adapter.Adapter != nil {
+	if err := ValidateStartupAdapterBinding(adapter); err != nil {
+		return err
+	}
+	if adapter.Adapter != nil && adapter.engine != nil {
 		return nil
 	}
 
@@ -149,36 +159,55 @@ func (adapter *Adapter) InitAdapter() error {
 	if adapter.UseSameDb || adapter.isBuiltIn() {
 		driverName = conf.GetConfigString("driverName")
 		dataSourceName = conf.GetConfigString("dataSourceName")
-		if conf.GetConfigString("driverName") == "mysql" {
-			dataSourceName = dataSourceName + conf.GetConfigString("dbName")
+		if driverName == "mysql" {
+			resolved, err := migrationDataSourceName(driverName, dataSourceName, conf.GetConfigString("dbName"), true)
+			if err != nil {
+				return err
+			}
+			dataSourceName = resolved
 		}
 	} else {
 		driverName = adapter.DatabaseType
+		if driverName == "sqlite3" {
+			driverName = "sqlite"
+		}
+		if driverName != "sqlite" {
+			err := checkDataSourceFields(map[string]string{"host": adapter.Host, "user": adapter.User, "database": adapter.Database})
+			if err != nil {
+				return err
+			}
+		}
+		err := checkTenantAdapterHost(adapter)
+		if err != nil {
+			return err
+		}
 		switch driverName {
 		case "mssql":
-			dataSourceName = fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s", adapter.User,
-				adapter.Password, adapter.Host, adapter.Port, adapter.Database)
+			dataSourceName = getMssqlDataSourceName(adapter.User, adapter.Password, adapter.Host, adapter.Port, adapter.Database)
 		case "mysql":
 			dataSourceName = fmt.Sprintf("%s:%s@tcp(%s:%d)/%s", adapter.User,
 				adapter.Password, adapter.Host, adapter.Port, adapter.Database)
 		case "postgres":
 			dataSourceName = fmt.Sprintf("user=%s password=%s host=%s port=%d sslmode=disable dbname=%s", adapter.User,
-				adapter.Password, adapter.Host, adapter.Port, adapter.Database)
+				quotePostgresDataSourceValue(adapter.Password), adapter.Host, adapter.Port, adapter.Database)
 		case "CockroachDB":
 			dataSourceName = fmt.Sprintf("user=%s password=%s host=%s port=%d sslmode=disable dbname=%s serial_normalization=virtual_sequence",
-				adapter.User, adapter.Password, adapter.Host, adapter.Port, adapter.Database)
-		case "sqlite3":
+				adapter.User, quotePostgresDataSourceValue(adapter.Password), adapter.Host, adapter.Port, adapter.Database)
+		case "sqlite":
 			dataSourceName = fmt.Sprintf("file:%s", adapter.Host)
 		default:
 			return fmt.Errorf("unsupported database type: %s", adapter.DatabaseType)
 		}
 	}
 
-	if !isCloudIntranet {
-		dataSourceName = strings.ReplaceAll(dataSourceName, "dbi.", "db.")
+	resolved, err := resolveAdapterDataSourceName(driverName, dataSourceName)
+	if err != nil {
+		return err
 	}
-
-	dataSourceName = conf.ReplaceDataSourceNameByDocker(dataSourceName)
+	dataSourceName = resolved
+	if err := validateControlledDatabaseTarget(driverName, dataSourceName); err != nil {
+		return err
+	}
 	engine, err := xorm.NewEngine(driverName, dataSourceName)
 	if err != nil {
 		return err
@@ -191,22 +220,35 @@ func (adapter *Adapter) InitAdapter() error {
 		}
 	}
 
-	var tableName string
-	if driverName == "mssql" {
-		tableName = fmt.Sprintf("[%s]", adapter.Table)
-	} else {
-		tableName = adapter.Table
-	}
+	tableName := adapter.Table
 
-	adapter.Adapter, err = xormadapter.NewAdapterByEngineWithTableName(engine, tableName, "")
+	var xa *xormadapter.Adapter
+	if StartupServeWithoutDDL() {
+		xa, err = xormadapter.NewAdapterByEngineWithExistingTable(engine, tableName, "")
+	} else {
+		xa, err = xormadapter.NewAdapterByEngineWithTableName(engine, tableName, "")
+	}
 	if err != nil {
+		_ = engine.Close()
 		return err
 	}
+
+	adapter.engine = engine
+	adapter.Adapter = xa
 
 	return nil
 }
 
-func adapterChangeTrigger(oldName string, newName string) error {
+// Keep the pre-connection startup check and the actual adapter path identical.
+func resolveAdapterDataSourceName(driverName, dataSourceName string) (string, error) {
+	if !isCloudIntranet {
+		dataSourceName = strings.ReplaceAll(dataSourceName, "dbi.", "db.")
+	}
+	dataSourceName = conf.ReplaceDataSourceNameByDocker(dataSourceName)
+	return migrationDataSourceName(driverName, dataSourceName, "", false)
+}
+
+func adapterChangeTrigger(owner string, oldName string, newName string) error {
 	session := ormer.Engine.NewSession()
 	defer session.Close()
 
@@ -215,15 +257,64 @@ func adapterChangeTrigger(oldName string, newName string) error {
 		return err
 	}
 
+	// enforcer.Adapter stores the full "owner/name" id
 	enforcer := new(Enforcer)
-	enforcer.Adapter = newName
-	_, err = session.Where("adapter=?", oldName).Update(enforcer)
+	enforcer.Adapter = util.GetId(owner, newName)
+	_, err = session.Where("adapter=?", util.GetId(owner, oldName)).Update(enforcer)
 	if err != nil {
 		session.Rollback()
 		return err
 	}
 
 	return session.Commit()
+}
+
+func getSameDbAdapterTable(adapter *Adapter) string {
+	if adapter.Table == "" {
+		return "casbin_rule"
+	}
+	return adapter.Table
+}
+
+func CheckSameDbAdapterTable(adapter *Adapter) error {
+	if !adapter.UseSameDb {
+		return nil
+	}
+
+	table := getSameDbAdapterTable(adapter)
+	existed, err := ormer.Engine.IsTableExist(table)
+	if err != nil {
+		return err
+	}
+	if !existed {
+		return nil
+	}
+
+	adapters, err := GetAdapters(adapter.Owner)
+	if err != nil {
+		return err
+	}
+	for _, ownAdapter := range adapters {
+		if ownAdapter.UseSameDb && strings.EqualFold(getSameDbAdapterTable(ownAdapter), table) {
+			return nil
+		}
+	}
+
+	return fmt.Errorf("the table: %s is already used by Casdoor or another organization", table)
+}
+
+func CheckAdapterHost(adapter *Adapter) error {
+	if adapter.UseSameDb || adapter.DatabaseType == "sqlite3" || adapter.DatabaseType == "sqlite" {
+		return nil
+	}
+	return util.CheckInternetHost(adapter.Host)
+}
+
+func checkTenantAdapterHost(adapter *Adapter) error {
+	if adapter.Owner == "built-in" {
+		return nil
+	}
+	return CheckAdapterHost(adapter)
 }
 
 func (adapter *Adapter) isBuiltIn() bool {

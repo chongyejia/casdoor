@@ -16,8 +16,9 @@ package controllers
 
 import (
 	"encoding/json"
+	"fmt"
 
-	"github.com/beego/beego/utils/pagination"
+	"github.com/beego/beego/v2/core/utils/pagination"
 	"github.com/casdoor/casdoor/object"
 	"github.com/casdoor/casdoor/util"
 )
@@ -30,13 +31,13 @@ import (
 // @Success 200 {array} object.Pricing The Response object
 // @router /get-pricings [get]
 func (c *ApiController) GetPricings() {
-	owner := c.Input().Get("owner")
-	limit := c.Input().Get("pageSize")
-	page := c.Input().Get("p")
-	field := c.Input().Get("field")
-	value := c.Input().Get("value")
-	sortField := c.Input().Get("sortField")
-	sortOrder := c.Input().Get("sortOrder")
+	owner := c.Ctx.Input.Query("owner")
+	limit := c.Ctx.Input.Query("pageSize")
+	page := c.Ctx.Input.Query("p")
+	field := c.Ctx.Input.Query("field")
+	value := c.Ctx.Input.Query("value")
+	sortField := c.Ctx.Input.Query("sortField")
+	sortOrder := c.Ctx.Input.Query("sortOrder")
 
 	if limit == "" || page == "" {
 		pricings, err := object.GetPricings(owner)
@@ -54,7 +55,7 @@ func (c *ApiController) GetPricings() {
 			return
 		}
 
-		paginator := pagination.SetPaginator(c.Ctx, limit, count)
+		paginator := pagination.NewPaginator(c.Ctx.Request, limit, count)
 		pricing, err := object.GetPaginatedPricings(owner, paginator.Offset(), limit, field, value, sortField, sortOrder)
 		if err != nil {
 			c.ResponseError(err.Error())
@@ -73,12 +74,20 @@ func (c *ApiController) GetPricings() {
 // @Success 200 {object} object.Pricing The Response object
 // @router /get-pricing [get]
 func (c *ApiController) GetPricing() {
-	id := c.Input().Get("id")
+	id := c.Ctx.Input.Query("id")
 
 	pricing, err := object.GetPricing(id)
 	if err != nil {
 		c.ResponseError(err.Error())
 		return
+	}
+
+	if pricing != nil && pricing.IsInviteOnly {
+		isGlobalAdmin, user := c.isGlobalAdmin()
+		if !isGlobalAdmin && (user == nil || !user.IsAdmin) && !pricing.IsUserAllowed(user) {
+			c.ResponseError(fmt.Sprintf(c.T("auth:The pricing: %s is invite-only, only invited users can use it"), pricing.Name))
+			return
+		}
 	}
 
 	c.ResponseOk(pricing)
@@ -93,7 +102,7 @@ func (c *ApiController) GetPricing() {
 // @Success 200 {object} controllers.Response The Response object
 // @router /update-pricing [post]
 func (c *ApiController) UpdatePricing() {
-	id := c.Input().Get("id")
+	id := c.Ctx.Input.Query("id")
 
 	var pricing object.Pricing
 	err := json.Unmarshal(c.Ctx.Input.RequestBody, &pricing)

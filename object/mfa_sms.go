@@ -24,19 +24,19 @@ type SmsMfa struct {
 	*MfaProps
 }
 
-func (mfa *SmsMfa) Initiate(userId string) (*MfaProps, error) {
+func (mfa *SmsMfa) Initiate(userId string, issuer string) (*MfaProps, error) {
 	mfaProps := MfaProps{
 		MfaType: mfa.MfaType,
 	}
 	return &mfaProps, nil
 }
 
-func (mfa *SmsMfa) SetupVerify(passCode string) error {
+func (mfa *SmsMfa) SetupVerify(passCode string, lang string) error {
 	if !util.IsEmailValid(mfa.Secret) {
 		mfa.Secret, _ = util.GetE164Number(mfa.Secret, mfa.CountryCode)
 	}
 
-	result, err := CheckVerificationCode(mfa.Secret, passCode, "en")
+	result, err := CheckVerificationCode(mfa.Secret, passCode, lang)
 	if err != nil {
 		return err
 	}
@@ -60,7 +60,8 @@ func (mfa *SmsMfa) Enable(user *User) error {
 		columns = append(columns, "mfa_phone_enabled", "phone", "country_code")
 	} else if mfa.MfaType == EmailType {
 		user.MfaEmailEnabled = true
-		columns = append(columns, "mfa_email_enabled", "email")
+		user.EmailVerified = true
+		columns = append(columns, "mfa_email_enabled", "email", "email_verified")
 	}
 
 	_, err := UpdateUser(user.GetId(), user, columns, false)
@@ -71,12 +72,12 @@ func (mfa *SmsMfa) Enable(user *User) error {
 	return nil
 }
 
-func (mfa *SmsMfa) Verify(passCode string) error {
+func (mfa *SmsMfa) Verify(passCode string, lang string) error {
 	if !util.IsEmailValid(mfa.Secret) {
 		mfa.Secret, _ = util.GetE164Number(mfa.Secret, mfa.CountryCode)
 	}
 
-	result, err := CheckVerificationCode(mfa.Secret, passCode, "en")
+	result, err := CheckVerificationCode(mfa.Secret, passCode, lang)
 	if err != nil {
 		return err
 	}
@@ -84,7 +85,7 @@ func (mfa *SmsMfa) Verify(passCode string) error {
 		return errors.New(result.Msg)
 	}
 
-	return nil
+	return DisableVerificationCode(mfa.Secret)
 }
 
 func NewSmsMfaUtil(config *MfaProps) *SmsMfa {

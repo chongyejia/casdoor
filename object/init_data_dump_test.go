@@ -13,13 +13,13 @@
 // limitations under the License.
 
 //go:build !skipCi
-// +build !skipCi
 
 package object
 
 import "testing"
 
 func TestDumpToFile(t *testing.T) {
+	createDatabase = false
 	InitConfig()
 
 	err := DumpToFile("./init_data_dump.json")

@@ -27,7 +27,7 @@ type Plan struct {
 	Name        string `xorm:"varchar(100) notnull pk" json:"name"`
 	CreatedTime string `xorm:"varchar(100)" json:"createdTime"`
 	DisplayName string `xorm:"varchar(100)" json:"displayName"`
-	Description string `xorm:"varchar(100)" json:"description"`
+	Description string `xorm:"mediumtext" json:"description"`
 
 	Price            float64  `json:"price"`
 	Currency         string   `xorm:"varchar(100)" json:"currency"`
@@ -35,6 +35,7 @@ type Plan struct {
 	Product          string   `xorm:"varchar(100)" json:"product"`
 	PaymentProviders []string `xorm:"varchar(100)" json:"paymentProviders"` // payment providers for related product
 	IsEnabled        bool     `json:"isEnabled"`
+	IsExclusive      bool     `json:"isExclusive"` // if true, a user can only have at most one subscription of this plan
 
 	Role    string   `xorm:"varchar(100)" json:"role"`
 	Options []string `xorm:"-" json:"options"`
@@ -49,17 +50,21 @@ func (plan *Plan) GetId() string {
 	return fmt.Sprintf("%s/%s", plan.Owner, plan.Name)
 }
 
-func GetDuration(period string) (startTime time.Time, endTime time.Time) {
+func getDuration(period string) (string, string, error) {
+	startTime := time.Now()
+	var endTime time.Time
+
 	if period == PeriodYearly {
-		startTime = time.Now()
 		endTime = startTime.AddDate(1, 0, 0)
 	} else if period == PeriodMonthly {
-		startTime = time.Now()
 		endTime = startTime.AddDate(0, 1, 0)
 	} else {
-		panic(fmt.Sprintf("invalid period: %s", period))
+		return "", "", fmt.Errorf("invalid period: %s", period)
 	}
-	return
+
+	startTimeString := startTime.Format(time.RFC3339)
+	endTimeString := endTime.Format(time.RFC3339)
+	return startTimeString, endTimeString, nil
 }
 
 func GetPlanCount(owner, field, value string) (int64, error) {
@@ -104,12 +109,18 @@ func getPlan(owner, name string) (*Plan, error) {
 }
 
 func GetPlan(id string) (*Plan, error) {
-	owner, name := util.GetOwnerAndNameFromId(id)
+	owner, name, err := util.GetOwnerAndNameFromIdWithError(id)
+	if err != nil {
+		return nil, err
+	}
 	return getPlan(owner, name)
 }
 
 func UpdatePlan(id string, plan *Plan) (bool, error) {
-	owner, name := util.GetOwnerAndNameFromId(id)
+	owner, name, err := util.GetOwnerAndNameFromIdWithError(id)
+	if err != nil {
+		return false, err
+	}
 	if p, err := getPlan(owner, name); err != nil {
 		return false, err
 	} else if p == nil {

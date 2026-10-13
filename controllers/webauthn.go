@@ -16,6 +16,7 @@ package controllers
 
 import (
 	"bytes"
+	"encoding/base64"
 	"fmt"
 	"io"
 
@@ -47,6 +48,13 @@ func (c *ApiController) WebAuthnSignupBegin() {
 
 	registerOptions := func(credCreationOpts *protocol.PublicKeyCredentialCreationOptions) {
 		credCreationOpts.CredentialExcludeList = user.CredentialExcludeList()
+		credCreationOpts.AuthenticatorSelection.ResidentKey = "preferred"
+		credCreationOpts.Attestation = "none"
+
+		ext := map[string]interface{}{
+			"credProps": true,
+		}
+		credCreationOpts.Extensions = ext
 	}
 	options, sessionData, err := webauthnObj.BeginRegistration(
 		user,
@@ -86,6 +94,7 @@ func (c *ApiController) WebAuthnSignupFinish() {
 		c.ResponseError(c.T("webauthn:Please call WebAuthnSigninBegin first"))
 		return
 	}
+	c.DelSession("registration")
 	c.Ctx.Request.Body = io.NopCloser(bytes.NewBuffer(c.Ctx.Input.RequestBody))
 
 	credential, err := webauthnObj.FinishRegistration(user, sessionData, c.Ctx.Request)
@@ -118,24 +127,34 @@ func (c *ApiController) WebAuthnSigninBegin() {
 		return
 	}
 
-	userOwner := c.Input().Get("owner")
-	userName := c.Input().Get("name")
-	user, err := object.GetUserByFields(userOwner, userName)
-	if err != nil {
-		c.ResponseError(err.Error())
-		return
+	userOwner := c.Ctx.Input.Query("owner")
+	userName := c.Ctx.Input.Query("name")
+
+	var options *protocol.CredentialAssertion
+	var sessionData *webauthn.SessionData
+
+	if userName == "" {
+		options, sessionData, err = webauthnObj.BeginDiscoverableLogin()
+	} else {
+		var user *object.User
+		user, err = object.GetUserByFields(userOwner, userName)
+		if err != nil {
+			c.ResponseError(err.Error())
+			return
+		}
+
+		if user == nil {
+			c.ResponseError(fmt.Sprintf(c.T("general:The user: %s doesn't exist"), util.GetId(userOwner, userName)))
+			return
+		}
+		if len(user.WebauthnCredentials) == 0 {
+			c.ResponseError(c.T("webauthn:Found no credentials for this user"))
+			return
+		}
+
+		options, sessionData, err = webauthnObj.BeginLogin(user)
 	}
 
-	if user == nil {
-		c.ResponseError(fmt.Sprintf(c.T("general:The user: %s doesn't exist"), util.GetId(userOwner, userName)))
-		return
-	}
-	if len(user.WebauthnCredentials) == 0 {
-		c.ResponseError(c.T("webauthn:Found no credentials for this user"))
-		return
-	}
-
-	options, sessionData, err := webauthnObj.BeginLogin(user)
 	if err != nil {
 		c.ResponseError(err.Error())
 		return
@@ -153,8 +172,8 @@ func (c *ApiController) WebAuthnSigninBegin() {
 // @Success 200 {object} controllers.Response "The Response object"
 // @router /webauthn/signin/finish [post]
 func (c *ApiController) WebAuthnSigninFinish() {
-	responseType := c.Input().Get("responseType")
-	clientId := c.Input().Get("clientId")
+	responseType := c.Ctx.Input.Query("responseType")
+	clientId := c.Ctx.Input.Query("clientId")
 	webauthnObj, err := object.GetWebAuthnObject(c.Ctx.Request.Host)
 	if err != nil {
 		c.ResponseError(err.Error())
@@ -167,21 +186,35 @@ func (c *ApiController) WebAuthnSigninFinish() {
 		c.ResponseError(c.T("webauthn:Please call WebAuthnSigninBegin first"))
 		return
 	}
+	c.DelSession("authentication")
 	c.Ctx.Request.Body = io.NopCloser(bytes.NewBuffer(c.Ctx.Input.RequestBody))
-	userId := string(sessionData.UserID)
-	user, err := object.GetUser(userId)
-	if err != nil {
-		c.ResponseError(err.Error())
-		return
+
+	var user *object.User
+	if sessionData.UserID != nil {
+		userId := string(sessionData.UserID)
+		user, err = object.GetUser(userId)
+		if err != nil {
+			c.ResponseError(err.Error())
+			return
+		}
+
+		_, err = webauthnObj.FinishLogin(user, sessionData, c.Ctx.Request)
+	} else {
+		handler := func(rawID, userHandle []byte) (webauthn.User, error) {
+			user, err = object.GetUserByWebauthID(base64.StdEncoding.EncodeToString(rawID))
+			if err != nil {
+				return nil, err
+			}
+			return user, nil
+		}
+
+		_, err = webauthnObj.FinishDiscoverableLogin(handler, sessionData, c.Ctx.Request)
 	}
 
-	_, err = webauthnObj.FinishLogin(user, sessionData, c.Ctx.Request)
 	if err != nil {
 		c.ResponseError(err.Error())
 		return
 	}
-	c.SetSessionUsername(userId)
-	util.LogInfo(c.Ctx, "API: [%s] signed in", userId)
 
 	var application *object.Application
 
@@ -194,10 +227,35 @@ func (c *ApiController) WebAuthnSigninFinish() {
 		c.ResponseError(err.Error())
 		return
 	}
+	if application == nil {
+		c.ResponseError(c.T("check:Application does not exist"))
+		return
+	}
+
+	if c.checkWebAuthnSigninMfa(user) {
+		return
+	}
 
 	var authForm form.AuthForm
 	authForm.Type = responseType
 	resp := c.HandleLoggedIn(application, user, &authForm)
+	if resp == nil {
+		return
+	}
+	if resp.Status == "ok" {
+		c.SetSessionUsername(user.GetId())
+		util.LogInfo(c.Ctx, "API: [%s] signed in", user.GetId())
+	}
 	c.Data["json"] = resp
 	c.ServeJSON()
+}
+
+func (c *ApiController) checkWebAuthnSigninMfa(user *object.User) bool {
+	organization, err := object.GetOrganizationByUser(user)
+	if err != nil {
+		c.ResponseError(err.Error())
+		return true
+	}
+
+	return checkMfaEnable(c, user, organization, "")
 }

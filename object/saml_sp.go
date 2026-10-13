@@ -18,20 +18,40 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/base64"
+	"encoding/pem"
 	"fmt"
 	"net/url"
-	"regexp"
-	"strings"
-
-	"github.com/casdoor/casdoor/idp"
-	"github.com/mitchellh/mapstructure"
+	"time"
 
 	"github.com/casdoor/casdoor/i18n"
+	"github.com/casdoor/casdoor/idp"
+	"github.com/mitchellh/mapstructure"
 	saml2 "github.com/russellhaering/gosaml2"
 	dsig "github.com/russellhaering/goxmldsig"
 )
 
-func ParseSamlResponse(samlResponse string, provider *Provider, host string) (*idp.UserInfo, error) {
+// IsValidSamlRedirectURL checks that the redirect URL in the SAML RelayState
+// points to the same origin as this Casdoor instance, preventing open redirect attacks.
+func IsValidSamlRedirectURL(redirectURL, host string) bool {
+	if redirectURL == "" {
+		return false
+	}
+	parsed, err := url.Parse(redirectURL)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	_, origin := getOriginFromHost(host)
+	originParsed, err := url.Parse(origin)
+	if err != nil {
+		return false
+	}
+	return parsed.Host == originParsed.Host
+}
+
+// ParseSamlResponse validates the SAMLResponse of the provider and returns the user it
+// asserts. requestId is the ID of the AuthnRequest this login started with, the
+// response must answer it.
+func ParseSamlResponse(samlResponse string, provider *Provider, host string, requestId string) (*idp.UserInfo, error) {
 	samlResponse, _ = url.QueryUnescape(samlResponse)
 	sp, err := buildSp(provider, samlResponse, host)
 	if err != nil {
@@ -39,6 +59,11 @@ func ParseSamlResponse(samlResponse string, provider *Provider, host string) (*i
 	}
 
 	assertionInfo, err := sp.RetrieveAssertionInfo(samlResponse)
+	if err != nil {
+		return nil, err
+	}
+
+	err = checkSamlAssertion(assertionInfo, requestId)
 	if err != nil {
 		return nil, err
 	}
@@ -63,46 +88,114 @@ func ParseSamlResponse(samlResponse string, provider *Provider, host string) (*i
 		Username:    customUserInfo.Username,
 		DisplayName: customUserInfo.DisplayName,
 		Email:       customUserInfo.Email,
-		AvatarUrl:   customUserInfo.AvatarUrl,
+		// asserted by the IdP's directory
+		EmailVerified: customUserInfo.Email != "",
+		AvatarUrl:     customUserInfo.AvatarUrl,
 	}
+
+	// Fallback: if Username is empty, use Email or NameID
+	if userInfo.Username == "" {
+		if userInfo.Email != "" {
+			userInfo.Username = userInfo.Email
+		} else if userInfo.Id != "" {
+			userInfo.Username = userInfo.Id
+		}
+	}
+
 	return userInfo, err
 }
 
-func GenerateSamlRequest(id, relayState, host, lang string) (auth string, method string, err error) {
+// checkSamlAssertion enforces what gosaml2 only reports in WarningInfo: the assertion
+// must be within its validity window, be issued to this SP, answer the AuthnRequest
+// this login started with, and not have been consumed before.
+func checkSamlAssertion(assertionInfo *saml2.AssertionInfo, requestId string) error {
+	warningInfo := assertionInfo.WarningInfo
+	if warningInfo != nil {
+		if warningInfo.InvalidTime {
+			return fmt.Errorf("the SAML assertion is not within its validity period (NotBefore / NotOnOrAfter)")
+		}
+		if warningInfo.NotInAudience {
+			return fmt.Errorf("the SAML assertion is not issued for this service provider (AudienceRestriction mismatch)")
+		}
+	}
+
+	if len(assertionInfo.Assertions) == 0 {
+		return fmt.Errorf("the SAML response contains no assertion")
+	}
+	assertion := assertionInfo.Assertions[0]
+
+	inResponseTo := ""
+	if assertion.Subject != nil && assertion.Subject.SubjectConfirmation != nil && assertion.Subject.SubjectConfirmation.SubjectConfirmationData != nil {
+		inResponseTo = assertion.Subject.SubjectConfirmation.SubjectConfirmationData.InResponseTo
+	}
+	if requestId == "" || inResponseTo != requestId {
+		return fmt.Errorf("the SAML assertion does not answer the AuthnRequest of this login (InResponseTo: %s)", inResponseTo)
+	}
+
+	if assertion.ID == "" {
+		return fmt.Errorf("the SAML assertion has no ID")
+	}
+	ttl := time.Hour
+	if assertion.Conditions != nil {
+		notOnOrAfter, err := time.Parse(time.RFC3339, assertion.Conditions.NotOnOrAfter)
+		if err == nil && notOnOrAfter.After(time.Now()) {
+			ttl = time.Until(notOnOrAfter)
+		}
+	}
+	isReplayed, err := SamlAssertionStore.MarkUsed(assertion.ID, ttl)
+	if err != nil {
+		return err
+	}
+	if isReplayed {
+		return fmt.Errorf("the SAML assertion has already been used: %s", assertion.ID)
+	}
+
+	return nil
+}
+
+// GenerateSamlRequest builds the AuthnRequest for the provider and returns, with the
+// URL or POST body carrying it, the request ID the response must answer.
+func GenerateSamlRequest(id, relayState, host, lang string) (auth string, method string, requestId string, err error) {
 	provider, err := GetProvider(id)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 	if provider.Category != "SAML" {
-		return "", "", fmt.Errorf(i18n.Translate(lang, "saml_sp:provider %s's category is not SAML"), provider.Name)
+		return "", "", "", fmt.Errorf(i18n.Translate(lang, "saml_sp:provider %s's category is not SAML"), provider.Name)
 	}
 
 	sp, err := buildSp(provider, "", host)
 	if err != nil {
-		return "", "", err
+		return "", "", "", err
 	}
 
+	doc, err := sp.BuildAuthRequestDocument()
+	if err != nil {
+		return "", "", "", err
+	}
+	requestId = doc.Root().SelectAttrValue("ID", "")
+
 	if provider.EnableSignAuthnRequest {
-		post, err := sp.BuildAuthBodyPost(relayState)
+		post, err := sp.BuildAuthBodyPostFromDocument(relayState, doc)
 		if err != nil {
-			return "", "", err
+			return "", "", "", err
 		}
 		auth = string(post[:])
 		method = "POST"
 	} else {
-		auth, err = sp.BuildAuthURL(relayState)
+		auth, err = sp.BuildAuthURLFromDocument(relayState, doc)
 		if err != nil {
-			return "", "", err
+			return "", "", "", err
 		}
 		method = "GET"
 	}
-	return auth, method, nil
+	return auth, method, requestId, nil
 }
 
 func buildSp(provider *Provider, samlResponse string, host string) (*saml2.SAMLServiceProvider, error) {
 	_, origin := getOriginFromHost(host)
 
-	certStore, err := buildSpCertificateStore(provider, samlResponse)
+	certStore, err := buildSpCertificateStore(provider)
 	if err != nil {
 		return nil, err
 	}
@@ -110,6 +203,7 @@ func buildSp(provider *Provider, samlResponse string, host string) (*saml2.SAMLS
 	sp := &saml2.SAMLServiceProvider{
 		ServiceProviderIssuer:       fmt.Sprintf("%s/api/acs", origin),
 		AssertionConsumerServiceURL: fmt.Sprintf("%s/api/acs", origin),
+		AudienceURI:                 fmt.Sprintf("%s/api/acs", origin),
 		SignAuthnRequests:           false,
 		IDPCertificateStore:         &certStore,
 		SPKeyStore:                  dsig.RandomKeyStoreForTest(),
@@ -141,21 +235,25 @@ func buildSpKeyStore() (dsig.X509KeyStore, error) {
 	}, nil
 }
 
-func buildSpCertificateStore(provider *Provider, samlResponse string) (certStore dsig.MemoryX509CertificateStore, err error) {
-	certEncodedData := ""
-	if samlResponse != "" {
-		certEncodedData, err = getCertificateFromSamlResponse(samlResponse, provider.Type)
-		if err != nil {
-			return
-		}
-	} else if provider.IdP != "" {
-		certEncodedData = provider.IdP
+func buildSpCertificateStore(provider *Provider) (certStore dsig.MemoryX509CertificateStore, err error) {
+	certEncodedData := provider.IdP
+	if certEncodedData == "" {
+		return dsig.MemoryX509CertificateStore{}, fmt.Errorf("the IdP certificate of provider: %s is empty", provider.Name)
 	}
 
-	certData, err := base64.StdEncoding.DecodeString(certEncodedData)
-	if err != nil {
-		return dsig.MemoryX509CertificateStore{}, err
+	var certData []byte
+	block, _ := pem.Decode([]byte(certEncodedData))
+	if block != nil {
+		// this was a PEM file
+		// block.Bytes are DER encoded so the following code block should happily accept it
+		certData = block.Bytes
+	} else {
+		certData, err = base64.StdEncoding.DecodeString(certEncodedData)
+		if err != nil {
+			return dsig.MemoryX509CertificateStore{}, err
+		}
 	}
+
 	idpCert, err := x509.ParseCertificate(certData)
 	if err != nil {
 		return dsig.MemoryX509CertificateStore{}, err
@@ -165,31 +263,4 @@ func buildSpCertificateStore(provider *Provider, samlResponse string) (certStore
 		Roots: []*x509.Certificate{idpCert},
 	}
 	return certStore, nil
-}
-
-func getCertificateFromSamlResponse(samlResponse string, providerType string) (string, error) {
-	de, err := base64.StdEncoding.DecodeString(samlResponse)
-	if err != nil {
-		return "", err
-	}
-	var (
-		expression string
-		deStr      = strings.Replace(string(de), "\n", "", -1)
-		tagMap     = map[string]string{
-			"Aliyun IDaaS": "ds",
-			"Keycloak":     "dsig",
-		}
-	)
-	tag := tagMap[providerType]
-	if tag == "" {
-		// <ds:X509Certificate>...</ds:X509Certificate>
-		// <dsig:X509Certificate>...</dsig:X509Certificate>
-		// <X509Certificate>...</X509Certificate>
-		// ...
-		expression = "<[^>]*:?X509Certificate>([\\s\\S]*?)<[^>]*:?X509Certificate>"
-	} else {
-		expression = fmt.Sprintf("<%s:X509Certificate>([\\s\\S]*?)</%s:X509Certificate>", tag, tag)
-	}
-	res := regexp.MustCompile(expression).FindStringSubmatch(deStr)
-	return res[1], nil
 }

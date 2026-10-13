@@ -15,52 +15,23 @@
 package object
 
 import (
-	"context"
-	"database/sql"
-	"database/sql/driver"
 	"fmt"
 	"strings"
 	"time"
 
-	"golang.org/x/crypto/ssh"
-
 	"github.com/casdoor/casdoor/util"
-	"github.com/go-sql-driver/mysql"
 )
 
 type OriginalUser = User
 
-type Credential struct {
-	Value string `json:"value"`
-	Salt  string `json:"salt"`
-}
-
 func (syncer *Syncer) getOriginalUsers() ([]*OriginalUser, error) {
-	var results []map[string]sql.NullString
-	err := syncer.Ormer.Engine.Table(syncer.getTable()).Find(&results)
-	if err != nil {
-		return nil, err
-	}
-
-	// Memory leak problem handling
-	// https://github.com/casdoor/casdoor/issues/1256
-	users := syncer.getOriginalUsersFromMap(results)
-	for _, m := range results {
-		for k := range m {
-			delete(m, k)
-		}
-	}
-
-	return users, nil
+	provider := GetSyncerProvider(syncer)
+	return provider.GetOriginalUsers()
 }
 
 func (syncer *Syncer) addUser(user *OriginalUser) (bool, error) {
-	m := syncer.getMapFromOriginalUser(user)
-	affected, err := syncer.Ormer.Engine.Table(syncer.getTable()).Insert(m)
-	if err != nil {
-		return false, err
-	}
-	return affected != 0, nil
+	provider := GetSyncerProvider(syncer)
+	return provider.AddUser(user)
 }
 
 func (syncer *Syncer) getCasdoorColumns() []string {
@@ -68,6 +39,11 @@ func (syncer *Syncer) getCasdoorColumns() []string {
 	for _, tableColumn := range syncer.TableColumns {
 		if tableColumn.CasdoorName != "Id" {
 			v := util.CamelToSnakeCase(tableColumn.CasdoorName)
+			// CasdoorName is org-admin controlled and these values become column names in
+			// an UPDATE SET clause, so drop anything that is not a plain SQL identifier.
+			if !util.FilterSQLIdentifier(v) {
+				continue
+			}
 			res = append(res, v)
 		}
 	}
@@ -75,21 +51,20 @@ func (syncer *Syncer) getCasdoorColumns() []string {
 }
 
 func (syncer *Syncer) updateUser(user *OriginalUser) (bool, error) {
-	key := syncer.getKey()
-	m := syncer.getMapFromOriginalUser(user)
-	pkValue := m[key]
-	delete(m, key)
-
-	affected, err := syncer.Ormer.Engine.Table(syncer.getTable()).Where(fmt.Sprintf("%s = ?", key), pkValue).Update(&m)
-	if err != nil {
-		return false, err
-	}
-	return affected != 0, nil
+	provider := GetSyncerProvider(syncer)
+	return provider.UpdateUser(user)
 }
 
 func (syncer *Syncer) updateUserForOriginalFields(user *User, key string) (bool, error) {
 	var err error
 	oldUser := User{}
+
+	// key is the snake_cased CasdoorName of the syncer's key column, which an org admin
+	// controls, and it is concatenated into the WHERE clause below, so reject any value
+	// that is not a plain SQL identifier to keep it from injecting SQL into Casdoor's DB.
+	if !util.FilterSQLIdentifier(key) {
+		return false, fmt.Errorf("object.updateUserForOriginalFields() error: invalid key field: %s", key)
+	}
 
 	existed, err := ormer.Engine.Where(key+" = ? and owner = ?", syncer.getUserValue(user, key), user.Owner).Get(&oldUser)
 	if err != nil {
@@ -108,6 +83,31 @@ func (syncer *Syncer) updateUserForOriginalFields(user *User, key string) (bool,
 
 	columns := syncer.getCasdoorColumns()
 	columns = append(columns, "affiliation", "hash", "pre_hash")
+
+	// Skip password-related columns when the incoming user has no password data.
+	// API-based syncers (DingTalk, WeCom, Lark, etc.) do not provide passwords,
+	// so updating these columns would wipe out locally set passwords.
+	if user.Password == "" {
+		filtered := make([]string, 0, len(columns))
+		for _, col := range columns {
+			if col != "password" && col != "password_salt" && col != "password_type" {
+				filtered = append(filtered, col)
+			}
+		}
+		columns = filtered
+	}
+
+	// Add provider-specific field for API-based syncers to enable login binding
+	// This allows synced users to login via their provider accounts
+	switch syncer.Type {
+	case "WeCom":
+		columns = append(columns, "wecom")
+	case "DingTalk":
+		columns = append(columns, "dingtalk")
+	case "Lark":
+		columns = append(columns, "lark")
+	}
+
 	affected, err := ormer.Engine.Where(key+" = ? and owner = ?", syncer.getUserValue(&oldUser, key), oldUser.Owner).Cols(columns...).Update(user)
 	if err != nil {
 		return false, err
@@ -129,82 +129,23 @@ func (syncer *Syncer) calculateHash(user *OriginalUser) string {
 	return util.GetMd5Hash(s)
 }
 
-type dsnConnector struct {
-	dsn    string
-	driver driver.Driver
-}
-
-func (t dsnConnector) Connect(ctx context.Context) (driver.Conn, error) {
-	return t.driver.Open(t.dsn)
-}
-
-func (t dsnConnector) Driver() driver.Driver {
-	return t.driver
-}
-
 func (syncer *Syncer) initAdapter() error {
-	if syncer.Ormer != nil {
-		return nil
-	}
-
-	var dataSourceName string
-	if syncer.DatabaseType == "mssql" {
-		dataSourceName = fmt.Sprintf("sqlserver://%s:%s@%s:%d?database=%s", syncer.User, syncer.Password, syncer.Host, syncer.Port, syncer.Database)
-	} else if syncer.DatabaseType == "postgres" {
-		sslMode := "disable"
-		if syncer.SslMode != "" {
-			sslMode = syncer.SslMode
-		}
-		dataSourceName = fmt.Sprintf("user=%s password=%s host=%s port=%d sslmode=%s dbname=%s", syncer.User, syncer.Password, syncer.Host, syncer.Port, sslMode, syncer.Database)
-	} else {
-		dataSourceName = fmt.Sprintf("%s:%s@tcp(%s:%d)/", syncer.User, syncer.Password, syncer.Host, syncer.Port)
-	}
-
-	var db *sql.DB
-	var err error
-
-	if syncer.SshType != "" && (syncer.DatabaseType == "mysql" || syncer.DatabaseType == "postgres" || syncer.DatabaseType == "mssql") {
-		var dial *ssh.Client
-		if syncer.SshType == "password" {
-			dial, err = DialWithPassword(syncer.SshUser, syncer.SshPassword, syncer.SshHost, syncer.SshPort)
-		} else {
-			dial, err = DialWithCert(syncer.SshUser, syncer.Owner+"/"+syncer.Cert, syncer.SshHost, syncer.SshPort)
-		}
-		if err != nil {
-			return err
-		}
-
-		if syncer.DatabaseType == "mysql" {
-			dataSourceName = fmt.Sprintf("%s:%s@%s(%s:%d)/", syncer.User, syncer.Password, syncer.Owner+syncer.Name, syncer.Host, syncer.Port)
-			mysql.RegisterDialContext(syncer.Owner+syncer.Name, (&ViaSSHDialer{Client: dial, Context: nil}).MysqlDial)
-		} else if syncer.DatabaseType == "postgres" || syncer.DatabaseType == "mssql" {
-			db = sql.OpenDB(dsnConnector{dsn: dataSourceName, driver: &ViaSSHDialer{Client: dial, Context: nil, DatabaseType: syncer.DatabaseType}})
-		}
-	}
-
-	if !isCloudIntranet {
-		dataSourceName = strings.ReplaceAll(dataSourceName, "dbi.", "db.")
-	}
-
-	if db != nil {
-		syncer.Ormer, err = NewAdapterFromDb(syncer.DatabaseType, dataSourceName, syncer.Database, db)
-	} else {
-		syncer.Ormer, err = NewAdapter(syncer.DatabaseType, dataSourceName, syncer.Database)
-	}
-
-	return err
+	provider := GetSyncerProvider(syncer)
+	return provider.InitAdapter()
 }
 
 func RunSyncUsersJob() {
 	syncers, err := GetSyncers("admin")
 	if err != nil {
-		panic(err)
+		fmt.Printf("RunSyncUsersJob() error: %s\n", err.Error())
+		return
 	}
 
+	// A failing syncer must not stop the others; its error is already in its error text
 	for _, syncer := range syncers {
 		err = addSyncerJob(syncer)
 		if err != nil {
-			panic(err)
+			fmt.Printf("RunSyncUsersJob() failed to start syncer [%s]: %s\n", syncer.GetId(), err.Error())
 		}
 	}
 
