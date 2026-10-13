@@ -9,8 +9,10 @@ import (
 	"strings"
 )
 
-const Mask = "***"
-const Omitted = "[audit body omitted: unsupported or malformed encoding]"
+const (
+	Mask    = "***"
+	Omitted = "[audit body omitted: unsupported or malformed encoding]"
+)
 
 func sensitive(key string) bool {
 	key, err := url.QueryUnescape(key)

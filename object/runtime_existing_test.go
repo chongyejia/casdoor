@@ -5,9 +5,10 @@ package object
 
 import (
 	"encoding/json"
-	"github.com/xorm-io/xorm"
 	"strings"
 	"testing"
+
+	"github.com/xorm-io/xorm"
 )
 
 func TestControlledRuntimeExistingAnchorsNoSeed(t *testing.T) {

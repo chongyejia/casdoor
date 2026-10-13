@@ -12,8 +12,10 @@ func TestSupportedBodies(t *testing.T) {
 	var multipartBody bytes.Buffer
 	w := multipart.NewWriter(&multipartBody)
 	for _, field := range []struct{ key, value string }{
-		{"userOwner", "petsengine"}, {"oldPassword", "synthetic-old"},
-		{"newPassword", "synthetic-new"}, {"newPassword", "synthetic-repeat"},
+		{"userOwner", "petsengine"},
+		{"oldPassword", "synthetic-old"},
+		{"newPassword", "synthetic-new"},
+		{"newPassword", "synthetic-repeat"},
 		{"confirm_password", "synthetic-confirm"},
 	} {
 		if err := w.WriteField(field.key, field.value); err != nil {
