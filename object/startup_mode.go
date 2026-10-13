@@ -24,11 +24,13 @@ import (
 // Controlled startup requires a manifest bound to the reviewed artifact and a
 // pre-provisioned persistent directory. The application cannot attest storage
 // durability; operators must verify it before migration. No reset is provided.
-var startupMode, startupManifestPath, startupManifestSHA256, startupAttemptID, startupAttemptDirectory string
-var controlledStartup *ControlledStartup
-var startupHex = regexp.MustCompile(`^[a-f0-9]{64}$`)
-var startupName = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{1,63}$`)
-var startupTable = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+var (
+	startupMode, startupManifestPath, startupManifestSHA256, startupAttemptID, startupAttemptDirectory string
+	controlledStartup                                                                                  *ControlledStartup
+	startupHex                                                                                         = regexp.MustCompile(`^[a-f0-9]{64}$`)
+	startupName                                                                                        = regexp.MustCompile(`^[a-z0-9][a-z0-9._-]{1,63}$`)
+	startupTable                                                                                       = regexp.MustCompile(`^[A-Za-z0-9_]+$`)
+)
 
 type StartupManifest struct {
 	ConfigurationSHA256 string            `json:"configurationSha256"`
@@ -72,6 +74,7 @@ func startupDigest(v interface{}) string {
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
 }
+
 func startupExecutableDigest() (string, error) {
 	name, err := os.Executable()
 	if err != nil {
@@ -88,6 +91,7 @@ func startupExecutableDigest() (string, error) {
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
 }
+
 func startupSyncDirectory(dir string) error {
 	f, err := os.Open(dir)
 	if err != nil {
@@ -168,7 +172,7 @@ func BeginControlledStartup() (*ControlledStartup, error) {
 		return nil, errors.New("invalid startup manifest or attempt input")
 	}
 	info, err := os.Lstat(startupAttemptDirectory)
-	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
+	if err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
 		return nil, errors.New("preexisting protected persistent attempt directory required")
 	}
 	resolved, err := filepath.EvalSymlinks(startupAttemptDirectory)
@@ -221,7 +225,7 @@ func BeginControlledStartup() (*ControlledStartup, error) {
 	g := &ControlledStartup{manifest: m, path: filepath.Join(startupAttemptDirectory, "casdoor-startup-attempt.json")}
 	if StartupServeWithoutDDL() {
 		info, err = os.Lstat(g.path)
-		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 {
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
 			return nil, errors.New("protected completed migration receipt required")
 		}
 		raw, err := readStartupFile(g.path)
@@ -239,7 +243,7 @@ func BeginControlledStartup() (*ControlledStartup, error) {
 		g.record = startupRecord{Attempt: startupAttemptID, Manifest: startupManifestSHA256, State: "STARTED"}
 		// The one active fence is created before the first DB connection or DDL.
 		// An existing STARTED, failed or completed fence is never overwritten here.
-		f, err := os.OpenFile(g.path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+		f, err := os.OpenFile(g.path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 		if err != nil {
 			return nil, errors.New("migration attempt already exists or fence unavailable; no retry")
 		}
@@ -257,6 +261,7 @@ func BeginControlledStartup() (*ControlledStartup, error) {
 	controlledStartup = g
 	return g, nil
 }
+
 func startupAdapterDigest(a *Adapter) string {
 	// Credentials are deliberately omitted; legitimate rotation does not alter target binding.
 	return startupDigest(struct {
@@ -309,6 +314,7 @@ func verifyStartupDatabaseTargets(expected string) error {
 	}
 	return nil
 }
+
 func ValidateStartupAdapterBinding(a *Adapter) error {
 	if controlledStartup == nil {
 		return nil
@@ -319,6 +325,7 @@ func ValidateStartupAdapterBinding(a *Adapter) error {
 	}
 	return nil
 }
+
 func startupMetadata(query string) ([]map[string]string, error) {
 	rows, err := ormer.Engine.QueryString(strings.Replace(query, "SELECT ", "SELECT /*+ MAX_EXECUTION_TIME(5000) */ ", 1) + " LIMIT 10001")
 	if err != nil {
@@ -329,6 +336,7 @@ func startupMetadata(query string) ([]map[string]string, error) {
 	}
 	return rows, nil
 }
+
 func (g *ControlledStartup) snapshot() (*startupSnapshot, error) {
 	resolved, err := migrationDataSourceName("mysql", conf.GetConfigDataSourceName(), conf.GetConfigString("dbName"), true)
 	if err != nil {
@@ -386,6 +394,7 @@ func (g *ControlledStartup) snapshot() (*startupSnapshot, error) {
 	}
 	return &startupSnapshot{Database: database, Schema: startupDigest(schema), API: api, UserPolicy: userPolicy, Bootstrap: startupDigest(bootstrap)}, nil
 }
+
 func (g *ControlledStartup) VerifyBefore() error {
 	s, err := g.snapshot()
 	if err != nil {
@@ -397,6 +406,7 @@ func (g *ControlledStartup) VerifyBefore() error {
 	g.record.Before = s
 	return nil
 }
+
 func (g *ControlledStartup) VerifyServe() error {
 	s, err := g.snapshot()
 	if err != nil {
@@ -411,6 +421,7 @@ func (g *ControlledStartup) VerifyServe() error {
 	g.serveInitialAPI = s.API
 	return nil
 }
+
 func (g *ControlledStartup) CompleteMigration() error {
 	s, err := g.snapshot()
 	if err != nil {

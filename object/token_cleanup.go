@@ -214,10 +214,15 @@ func deleteTokenCleanupSnapshotContext(ctx context.Context, token *Token) (int64
 	query := ormer.Engine.Context(ctx).Where("owner = ? AND name = ?", token.Owner, token.Name)
 	defer query.Close()
 	fields := []struct{ name, value string }{
-		{"owner", token.Owner}, {"name", token.Name}, {"organization", token.Organization},
-		{"created_time", token.CreatedTime}, {"refresh_token", token.RefreshToken},
-		{"refresh_token_hash", token.RefreshTokenHash}, {"application", token.Application},
-		{"access_token", token.AccessToken}, {"access_token_hash", token.AccessTokenHash},
+		{"owner", token.Owner},
+		{"name", token.Name},
+		{"organization", token.Organization},
+		{"created_time", token.CreatedTime},
+		{"refresh_token", token.RefreshToken},
+		{"refresh_token_hash", token.RefreshTokenHash},
+		{"application", token.Application},
+		{"access_token", token.AccessToken},
+		{"access_token_hash", token.AccessTokenHash},
 	}
 	for _, field := range fields {
 		var condition string

@@ -83,9 +83,11 @@ func ValidateBuiltinProvisionedUser(application *Application, user *User) error 
 			return fmt.Errorf("restricted builtin provisioning rejects custom authority properties")
 		}
 	}
-	allowed := map[string]bool{"Owner": true, "Name": true, "CreatedTime": true,
+	allowed := map[string]bool{
+		"Owner": true, "Name": true, "CreatedTime": true,
 		"DisplayName": true, "Avatar": true, "Phone": true, "CountryCode": true,
-		"Tag": true, "Type": true, "WeChat": true, "SignupApplication": true, "Properties": true}
+		"Tag": true, "Type": true, "WeChat": true, "SignupApplication": true, "Properties": true,
+	}
 	v := reflect.ValueOf(*user)
 	for i := 0; i < v.NumField(); i++ {
 		if !allowed[v.Type().Field(i).Name] && !v.Field(i).IsZero() {
@@ -135,8 +137,10 @@ func ValidateBuiltinServiceUserUpdate(oldUser, user *User, columns string) error
 		user.Owner != oldUser.Owner || user.Name != oldUser.Name || user.Id != oldUser.Id || columns == "" {
 		return fmt.Errorf("restricted builtin service cannot update this identity")
 	}
-	allowed := map[string]bool{"phone": true, "country_code": true, "countryCode": true,
-		"avatar": true, "display_name": true, "displayName": true, "external_id": true, "externalId": true}
+	allowed := map[string]bool{
+		"phone": true, "country_code": true, "countryCode": true,
+		"avatar": true, "display_name": true, "displayName": true, "external_id": true, "externalId": true,
+	}
 	for _, col := range strings.Split(columns, ",") {
 		if !allowed[col] {
 			return fmt.Errorf("restricted builtin service cannot update column %s", col)
