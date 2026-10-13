@@ -23,6 +23,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/beego/beego/v2/core/logs"
 	"github.com/casdoor/casdoor/conf"
 	"github.com/casdoor/casdoor/i18n"
 	"github.com/casdoor/casdoor/idp"
@@ -80,12 +81,85 @@ func chooseTypedLarkUser(users []*User, owner, idType, value, appID, tenantKey s
 		return nil, fmt.Errorf("Lark account is outside the requested organization")
 	}
 	if !matchesTypedLarkIdentity(users[0], idType, value, appID, tenantKey) {
-		return nil, fmt.Errorf("Lark account lacks matching typed identity evidence")
+		if users[0].Lark != value || appID == "" || tenantKey == "" || larkPropertyKey(idType) == "" ||
+			hasConflictingLarkEvidence(users[0], idType, value, appID, tenantKey) {
+			return nil, fmt.Errorf("Lark account lacks matching typed identity evidence")
+		}
+		if users[0].IsForbidden || users[0].IsDeleted {
+			return nil, fmt.Errorf("Lark account is inactive")
+		}
+		if err := backfillLarkEvidence(users[0], idType, value, appID, tenantKey); err != nil {
+			return nil, err
+		}
 	}
 	if users[0].IsForbidden || users[0].IsDeleted {
 		return nil, fmt.Errorf("Lark account is inactive")
 	}
 	return users[0], nil
+}
+
+// hasConflictingLarkEvidence reports whether any saved Lark evidence (direct
+// properties or oauth_Lark_extra) is present but differs from the login.
+// Missing evidence is not a conflict. Only the typed key is compared, so an
+// open_id saved under larkUserId conflicts only for user_id logins.
+func hasConflictingLarkEvidence(user *User, idType, value, appID, tenantKey string) bool {
+	if user == nil {
+		return true
+	}
+	key := larkPropertyKey(idType)
+	if key == "" {
+		return true
+	}
+	want := map[string]string{key: value, "larkAppId": appID, "larkTenantKey": tenantKey, "larkIdType": idType}
+	sources := []map[string]string{user.Properties}
+	if raw := user.Properties["oauth_Lark_extra"]; raw != "" {
+		var extra map[string]string
+		if err := jsoniter.Unmarshal([]byte(raw), &extra); err != nil {
+			return true // Unreadable evidence needs manual review.
+		}
+		sources = append(sources, extra)
+	}
+	for _, src := range sources {
+		for k, v := range want {
+			if got := src[k]; got != "" && got != v {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+var persistLarkEvidence = func(user *User) error {
+	_, err := UpdateUser(user.GetId(), user, []string{"properties"}, false)
+	return err
+}
+
+// backfillLarkEvidence merges the typed Lark evidence into oauth_Lark_extra,
+// keeping existing keys, and persists only the properties column.
+func backfillLarkEvidence(user *User, idType, value, appID, tenantKey string) error {
+	extra := map[string]string{}
+	if raw := user.Properties["oauth_Lark_extra"]; raw != "" {
+		if err := jsoniter.Unmarshal([]byte(raw), &extra); err != nil {
+			return fmt.Errorf("Lark account lacks matching typed identity evidence")
+		}
+	}
+	extra[larkPropertyKey(idType)] = value
+	extra["larkAppId"] = appID
+	extra["larkTenantKey"] = tenantKey
+	extra["larkIdType"] = idType
+	data, err := jsoniter.Marshal(extra)
+	if err != nil {
+		return err
+	}
+	if user.Properties == nil {
+		user.Properties = map[string]string{}
+	}
+	user.Properties["oauth_Lark_extra"] = string(data)
+	if err := persistLarkEvidence(user); err != nil {
+		return err
+	}
+	logs.Warn("lark identity: backfilled missing typed evidence for user %s/%s (type %s)", user.Owner, user.Name, idType)
+	return nil
 }
 
 func larkPropertyKey(idType string) string {
