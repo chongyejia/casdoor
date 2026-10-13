@@ -1,0 +1,29 @@
+[
+  {
+    "op": "test",
+    "path": "/metadata/uid",
+    "value": "867ff97a-769d-4cee-99b5-8a29e1577ff0"
+  },
+  {
+    "op": "test",
+    "path": "/spec/template/spec/containers/0/name",
+    "value": "casdoor"
+  },
+  {
+    "op": "test",
+    "path": "/spec/template/spec/containers/0/image",
+    "value": "registry-vpc.cn-shanghai.aliyuncs.com/chongyejia/casdoor@sha256:4cc7c8b13e82189633ff818f73dcb7104d47a116f47b901868642094b05ddcd0"
+  },
+  {
+    "op": "replace",
+    "path": "/spec/template/spec/containers/0/image",
+    "value": "registry-vpc.cn-shanghai.aliyuncs.com/chongyejia/casdoor@sha256:4d76fd3665668bfb179baac9972b0a7ba7885582ff75b23d7a1d3485ecae34ad"
+  },
+  {
+    "op": "add",
+    "path": "/spec/template/spec/containers/0/command",
+    "value": [
+      "/server"
+    ]
+  }
+]
