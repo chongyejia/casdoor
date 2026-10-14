@@ -116,3 +116,27 @@ func TestBuiltinIsolationProfileUpdate(t *testing.T) {
 		t.Fatal("administrator update accepted")
 	}
 }
+
+func TestApplyBuiltinAppAddUserDefaults(t *testing.T) {
+	for _, tc := range []struct {
+		name, session, owner, phone, cc string
+		wantOwner, wantPhone, wantCC    string
+	}{
+		{"builtin app empty owner bare CN mobile", "app/app-built-in", "", "13800138000", "", "built-in", "13800138000", "CN"},
+		{"builtin app explicit built-in", "app/app-built-in", "built-in", "13800138000", "", "built-in", "13800138000", "CN"},
+		{"builtin app keeps country code", "app/app-built-in", "", "2025550123", "US", "built-in", "2025550123", "US"},
+		{"builtin app non-mobile untouched", "app/app-built-in", "", "12345", "", "built-in", "12345", ""},
+		{"builtin app other owner untouched", "app/app-built-in", "org1", "13800138000", "", "org1", "13800138000", ""},
+		{"other caller empty owner untouched", "app/other", "", "13800138000", "", "", "13800138000", ""},
+		{"user caller untouched", "built-in/admin", "", "13800138000", "", "", "13800138000", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			u := &User{Owner: tc.owner, Phone: tc.phone, CountryCode: tc.cc}
+			ApplyBuiltinAppAddUserDefaults(tc.session, u)
+			if u.Owner != tc.wantOwner || u.Phone != tc.wantPhone || u.CountryCode != tc.wantCC {
+				t.Fatalf("got owner=%q phone=%q cc=%q", u.Owner, u.Phone, u.CountryCode)
+			}
+		})
+	}
+	ApplyBuiltinAppAddUserDefaults("app/app-built-in", nil)
+}

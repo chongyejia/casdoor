@@ -121,6 +121,21 @@ func NormalizeBuiltinProvisionedPhone(user *User) {
 	}
 }
 
+// ApplyBuiltinAppAddUserDefaults fills defaults for add-user calls made by the
+// built-in application (app/app-built-in), whose legacy SDK omits owner and
+// countryCode. Other callers are left untouched.
+func ApplyBuiltinAppAddUserDefaults(sessionUser string, user *User) {
+	if user == nil || sessionUser != "app/app-built-in" {
+		return
+	}
+	if user.Owner == "" {
+		user.Owner = "built-in"
+	}
+	if user.Owner == "built-in" {
+		NormalizeBuiltinProvisionedPhone(user)
+	}
+}
+
 func AddBuiltinUserFromService(application *Application, user *User, lang string) (bool, error) {
 	if err := ValidateBuiltinProvisionedUser(application, user); err != nil {
 		return false, err

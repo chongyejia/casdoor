@@ -429,6 +429,8 @@ func (c *ApiController) AddUser() {
 		return
 	}
 
+	object.ApplyBuiltinAppAddUserDefaults(c.GetSessionUsername(), &user)
+
 	var provisioner *object.Application
 	if conf.BuiltinIsolationEnabled() && user.Owner == "built-in" {
 		verified, _ := c.Ctx.Input.GetData("builtinProvisioningApplication").(string)
