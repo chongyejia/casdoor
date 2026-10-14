@@ -39,7 +39,7 @@ func controlledFixture(t *testing.T) StartupManifest {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Chmod(startupAttemptDirectory, 0700); err != nil {
+	if err := os.Chmod(startupAttemptDirectory, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	startupManifestPath = filepath.Join(startupAttemptDirectory, "manifest.json")
@@ -71,7 +71,7 @@ func writeControlledManifest(t *testing.T, m StartupManifest) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(startupManifestPath, b, 0600); err != nil {
+	if err := os.WriteFile(startupManifestPath, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	h := sha256.Sum256(b)
@@ -80,9 +80,11 @@ func writeControlledManifest(t *testing.T, m StartupManifest) {
 
 func completedControlledRecord(m StartupManifest) startupRecord {
 	u := startupDigest("unchanged-user-policy")
-	return startupRecord{Attempt: startupAttemptID, Manifest: startupManifestSHA256, State: "COMPLETED",
+	return startupRecord{
+		Attempt: startupAttemptID, Manifest: startupManifestSHA256, State: "COMPLETED",
 		Before: &startupSnapshot{Database: m.DatabaseSHA256, Schema: m.SchemaBefore, API: m.APIBefore, UserPolicy: u, Bootstrap: m.BootstrapSHA256},
-		After:  &startupSnapshot{Database: m.DatabaseSHA256, Schema: m.SchemaAfter, API: m.APIAfter, UserPolicy: u, Bootstrap: m.BootstrapSHA256}}
+		After:  &startupSnapshot{Database: m.DatabaseSHA256, Schema: m.SchemaAfter, API: m.APIAfter, UserPolicy: u, Bootstrap: m.BootstrapSHA256},
+	}
 }
 
 func writeControlledRecord(t *testing.T, r startupRecord) string {
@@ -92,7 +94,7 @@ func writeControlledRecord(t *testing.T, r startupRecord) string {
 		t.Fatal(err)
 	}
 	p := filepath.Join(startupAttemptDirectory, "casdoor-startup-attempt.json")
-	if err := os.WriteFile(p, b, 0600); err != nil {
+	if err := os.WriteFile(p, b, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	return p
@@ -127,7 +129,7 @@ func TestControlledStartupRejectsUnsafeInputs(t *testing.T) {
 			case "prefix":
 				t.Setenv("tableNamePrefix", "other_")
 			case "directory":
-				if err := os.Chmod(original, 0755); err != nil {
+				if err := os.Chmod(original, 0o755); err != nil {
 					t.Fatal(err)
 				}
 			case "symlink":
@@ -187,7 +189,7 @@ func TestControlledStartupExclusiveFence(t *testing.T) {
 		t.Fatal(err)
 	}
 	info, err := os.Stat(g.path)
-	if err != nil || info.Mode().Perm() != 0600 {
+	if err != nil || info.Mode().Perm() != 0o600 {
 		t.Fatal("unprotected migration fence")
 	}
 	before, err := os.ReadFile(g.path)
@@ -231,7 +233,7 @@ func TestControlledStartupCompletedReceiptBinding(t *testing.T) {
 			if tc != "missing" {
 				p := writeControlledRecord(t, r)
 				if tc == "permissions" {
-					if err := os.Chmod(p, 0644); err != nil {
+					if err := os.Chmod(p, 0o644); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -281,7 +283,7 @@ func TestControlledStartupEffectiveConfiguration(t *testing.T) {
 
 func TestControlledStartupFileBounds(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "large")
-	if err := os.WriteFile(p, []byte(strings.Repeat("x", 65537)), 0600); err != nil {
+	if err := os.WriteFile(p, []byte(strings.Repeat("x", 65537)), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := readStartupFile(p); err == nil {
@@ -290,7 +292,7 @@ func TestControlledStartupFileBounds(t *testing.T) {
 	if _, err := readStartupFile(p + "-missing"); err == nil {
 		t.Fatal("missing file accepted")
 	}
-	if err := os.WriteFile(p, []byte("bounded"), 0600); err != nil {
+	if err := os.WriteFile(p, []byte("bounded"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	got, err := readStartupFile(p)

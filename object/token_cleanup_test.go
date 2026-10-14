@@ -216,8 +216,16 @@ func TestTokenCleanupConditionalDelete(t *testing.T) {
 		column string
 		value  interface{}
 	}{
-		{"owner", "owner"}, {"name", "SAME-key"}, {"organization", "SYNTHETIC"}, {"created_time", "2026-01-02T00:00:00Z"}, {"expires_in", 7200},
-		{"refresh_token", "opaque-OLD"}, {"refresh_token_hash", "hash-OLD"}, {"application", "APP-old"}, {"access_token", "access-OLD"}, {"access_token_hash", "ahash-OLD"},
+		{"owner", "owner"},
+		{"name", "SAME-key"},
+		{"organization", "SYNTHETIC"},
+		{"created_time", "2026-01-02T00:00:00Z"},
+		{"expires_in", 7200},
+		{"refresh_token", "opaque-OLD"},
+		{"refresh_token_hash", "hash-OLD"},
+		{"application", "APP-old"},
+		{"access_token", "access-OLD"},
+		{"access_token_hash", "ahash-OLD"},
 	}
 	for _, c := range changes {
 		t.Run(c.column, func(t *testing.T) {

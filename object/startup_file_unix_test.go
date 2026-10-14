@@ -16,7 +16,7 @@ import (
 func TestControlledStartupNonregularFiles(t *testing.T) {
 	dir := t.TempDir()
 	fifo := filepath.Join(dir, "fifo")
-	if err := syscall.Mkfifo(fifo, 0600); err != nil {
+	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	for _, path := range []string{fifo, dir, "/dev/null"} {
@@ -34,7 +34,7 @@ func TestControlledStartupNonregularFiles(t *testing.T) {
 		})
 	}
 	regular := filepath.Join(dir, "projected-config")
-	if err := os.WriteFile(regular, []byte("bounded"), 0600); err != nil {
+	if err := os.WriteFile(regular, []byte("bounded"), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	link := filepath.Join(dir, "config-link")
