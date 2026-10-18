@@ -22,6 +22,7 @@ func setupSyntheticPasswordlessPasswordGrant(t *testing.T) (*Application, *Organ
 	t.Helper()
 	t.Setenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_APPLICATION", "")
 	t.Setenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_ORGANIZATION", "")
+	t.Setenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_PAIRS", "")
 
 	app, org, user, _ := setupSyntheticLarkTokenFlow(t)
 	if err := ormer.Engine.Sync2(new(Syncer)); err != nil {
@@ -292,6 +293,46 @@ func TestPasswordlessMasterPasswordGrantRejectsInvalidCredentialsAndUsers(t *tes
 				expectedSigninFailureUser = user.GetId()
 			}
 			requireSyntheticPasswordGrantDeniedWithoutMutation(t, user.Name, tc.pass, tc.secret, expectedSigninFailureUser)
+		})
+	}
+}
+
+func TestPasswordlessMasterPasswordGrantPairsMintTokensForListedPair(t *testing.T) {
+	app, _, user := setupSyntheticPasswordlessPasswordGrant(t)
+	// Legacy single pair names another application; the listed pair must still work.
+	t.Setenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_APPLICATION", "admin/app-built-in")
+	t.Setenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_ORGANIZATION", "built-in")
+	t.Setenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_PAIRS", "admin/other-app@other-org, "+syntheticPasswordlessApplication+"@"+syntheticPasswordlessOrg)
+	result, err := requestSyntheticPasswordlessPasswordGrant(user.Name, syntheticPasswordlessMaster, syntheticPasswordlessSecret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tokens, ok := result.(*TokenWrapper)
+	if !ok {
+		t.Fatalf("expected password grant token wrapper, got %T", result)
+	}
+	if tokens.AccessToken == "" || tokens.IdToken == "" {
+		t.Fatal("listed pair must issue access and ID tokens")
+	}
+	if app.ClientId != syntheticPasswordlessClientID {
+		t.Fatal("unexpected synthetic client")
+	}
+}
+
+func TestPasswordlessMasterPasswordGrantPairsRejectUnlistedAndUnauthenticated(t *testing.T) {
+	for _, tc := range []struct {
+		name, pairs, secret string
+	}{
+		{name: "unlisted application", pairs: "admin/app-built-in@built-in,admin/oms@cyj-inner", secret: syntheticPasswordlessSecret},
+		{name: "wrong organization", pairs: syntheticPasswordlessApplication + "@other-org", secret: syntheticPasswordlessSecret},
+		{name: "malformed entry", pairs: syntheticPasswordlessApplication + syntheticPasswordlessOrg, secret: syntheticPasswordlessSecret},
+		{name: "missing client secret", pairs: syntheticPasswordlessApplication + "@" + syntheticPasswordlessOrg, secret: ""},
+		{name: "wrong client secret", pairs: syntheticPasswordlessApplication + "@" + syntheticPasswordlessOrg, secret: "synthetic-wrong-client-secret"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, user := setupSyntheticPasswordlessPasswordGrant(t)
+			t.Setenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_PAIRS", tc.pairs)
+			requireSyntheticPasswordGrantDeniedWithoutMutation(t, user.Name, syntheticPasswordlessMaster, tc.secret, "")
 		})
 	}
 }

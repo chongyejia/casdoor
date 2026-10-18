@@ -130,6 +130,11 @@ func startupConfigurationDigest() (string, error) {
 	for _, key := range []string{"CASDOOR_PASSWORDLESS_MASTER_GRANT_APPLICATION", "CASDOOR_PASSWORDLESS_MASTER_GRANT_ORGANIZATION"} {
 		configuration[key] = os.Getenv(key)
 	}
+	// The multi-pair variable is bound only when set, so manifests approved
+	// before it existed keep the same configuration digest while it is unset.
+	if pairs := os.Getenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_PAIRS"); pairs != "" {
+		configuration["CASDOOR_PASSWORDLESS_MASTER_GRANT_PAIRS"] = pairs
+	}
 	on, mdl, row, err := migrationLockOptions("mysql")
 	if err != nil {
 		return "", err
