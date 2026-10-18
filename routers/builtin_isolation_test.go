@@ -42,3 +42,38 @@ func TestBuiltinIsolationAppTokenSession(t *testing.T) {
 		t.Fatal("off behavior changed")
 	}
 }
+
+func TestBuiltinIsolationPreAuthPaths(t *testing.T) {
+	for _, tt := range []struct {
+		method string
+		path   string
+	}{
+		{"GET", "/api/get-app-login"},
+		{"GET", "/.well-known/openid-configuration"},
+		{"GET", "/.well-known/petsengine-test/openid-configuration"},
+		{"GET", "/.well-known/petsengine-test/jwks"},
+		{"GET", "/api/webauthn/signin/begin"},
+		{"POST", "/api/webauthn/signin/finish"},
+		{"GET", "/api/webauthn/signup/begin"},
+		{"POST", "/api/webauthn/signup/finish"},
+		{"GET", "/api/webauthn/signin/begin-extra"},
+	} {
+		t.Run(tt.method+" "+tt.path, func(t *testing.T) {
+			ctx := context.NewContext()
+			// A query parameter must not override the path used for isolation.
+			ctx.Reset(httptest.NewRecorder(), httptest.NewRequest(tt.method, tt.path+"?detailPathUrl=/api/webauthn/signin/begin", nil))
+			path := getUrlPath(ctx)
+			extra := getExtraInfo(ctx, path)
+			if strings.HasPrefix(tt.path, "/api/webauthn/") {
+				if path != "/api/webauthn" {
+					t.Fatalf("generic policy path = %q, want /api/webauthn", path)
+				}
+				if extra["detailPathUrl"] != tt.path {
+					t.Errorf("isolation path = %v, want %q", extra["detailPathUrl"], tt.path)
+				}
+			} else if path != tt.path {
+				t.Errorf("public path = %q, want %q", path, tt.path)
+			}
+		})
+	}
+}
