@@ -404,12 +404,66 @@ func GetPasswordToken(application *Application, clientSecret string, username st
 	return token, nil, nil
 }
 
+const (
+	passwordlessMasterGrantApplicationEnv  = "CASDOOR_PASSWORDLESS_MASTER_GRANT_APPLICATION"
+	passwordlessMasterGrantOrganizationEnv = "CASDOOR_PASSWORDLESS_MASTER_GRANT_ORGANIZATION"
+	// passwordlessMasterGrantPairsEnv lists additional opted-in pairs as
+	// comma-separated "owner/application@organization" entries, for example
+	// "admin/app-built-in@built-in,admin/oms@cyj-inner".
+	passwordlessMasterGrantPairsEnv = "CASDOOR_PASSWORDLESS_MASTER_GRANT_PAIRS"
+)
+
+type passwordlessMasterGrantPair struct {
+	application  string
+	organization string
+}
+
+// parsePasswordlessMasterGrantPair accepts only "owner/name@organization" with
+// non-empty parts and no whitespace, "/" in the organization or extra "@".
+// Malformed entries are ignored (fail closed) rather than widened.
+func parsePasswordlessMasterGrantPair(entry string) (passwordlessMasterGrantPair, bool) {
+	if strings.ContainsAny(entry, " \t\r\n") || strings.Count(entry, "@") != 1 {
+		return passwordlessMasterGrantPair{}, false
+	}
+	application, organization, _ := strings.Cut(entry, "@")
+	owner, name, found := strings.Cut(application, "/")
+	if !found || owner == "" || name == "" || strings.Contains(name, "/") || organization == "" || strings.Contains(organization, "/") {
+		return passwordlessMasterGrantPair{}, false
+	}
+	return passwordlessMasterGrantPair{application: application, organization: organization}, true
+}
+
+// passwordlessMasterGrantPairs returns the opted-in application/organization
+// pairs. The legacy single-pair variables stay supported and both must be set.
+func passwordlessMasterGrantPairs() []passwordlessMasterGrantPair {
+	pairs := []passwordlessMasterGrantPair{}
+	allowedApplication := os.Getenv(passwordlessMasterGrantApplicationEnv)
+	allowedOrganization := os.Getenv(passwordlessMasterGrantOrganizationEnv)
+	if allowedApplication != "" && allowedOrganization != "" {
+		pairs = append(pairs, passwordlessMasterGrantPair{application: allowedApplication, organization: allowedOrganization})
+	}
+	for _, entry := range strings.Split(os.Getenv(passwordlessMasterGrantPairsEnv), ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		if pair, ok := parsePasswordlessMasterGrantPair(entry); ok {
+			pairs = append(pairs, pair)
+		}
+	}
+	return pairs
+}
+
 func isPasswordlessMasterGrantApplication(application *Application, user *User) bool {
-	allowedApplication := os.Getenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_APPLICATION")
-	allowedOrganization := os.Getenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_ORGANIZATION")
-	return allowedApplication != "" && allowedOrganization != "" && application != nil && user != nil &&
-		application.GetId() == allowedApplication && application.Organization == allowedOrganization &&
-		user.Owner == allowedOrganization && !application.IsShared
+	if application == nil || user == nil || application.IsShared {
+		return false
+	}
+	for _, pair := range passwordlessMasterGrantPairs() {
+		if application.GetId() == pair.application && application.Organization == pair.organization && user.Owner == pair.organization {
+			return true
+		}
+	}
+	return false
 }
 
 func isPasswordlessMasterGrantClientAuthenticated(application *Application, clientSecret string) bool {

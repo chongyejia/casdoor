@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/casdoor/casdoor/conf"
 )
 
 func controlledFixture(t *testing.T) StartupManifest {
@@ -28,6 +30,7 @@ func controlledFixture(t *testing.T) StartupManifest {
 		"CASDOOR_BUILTIN_PROVISIONER_APPLICATION":        "admin/app-built-in",
 		"CASDOOR_PASSWORDLESS_MASTER_GRANT_APPLICATION":  "admin/app-built-in",
 		"CASDOOR_PASSWORDLESS_MASTER_GRANT_ORGANIZATION": "built-in",
+		"CASDOOR_PASSWORDLESS_MASTER_GRANT_PAIRS":        "",
 		"CASDOOR_MIGRATION_LOCK_LIMITS_ENABLED":          "true", "CASDOOR_MIGRATION_LOCK_WAIT_SECONDS": "5", "CASDOOR_MIGRATION_INNODB_LOCK_WAIT_SECONDS": "5",
 	} {
 		t.Setenv(k, v)
@@ -152,7 +155,7 @@ func TestControlledStartupRejectsUnsafeInputs(t *testing.T) {
 }
 
 func TestControlledStartupManifestBinding(t *testing.T) {
-	for _, tc := range []string{"checksum", "binary", "authority", "passwordless", "adapter", "version"} {
+	for _, tc := range []string{"checksum", "binary", "authority", "passwordless", "passwordless-pairs", "adapter", "version"} {
 		t.Run(tc, func(t *testing.T) {
 			m := controlledFixture(t)
 			switch tc {
@@ -165,6 +168,8 @@ func TestControlledStartupManifestBinding(t *testing.T) {
 				t.Setenv("CASDOOR_BUILTIN_ADMIN_IDS", `["other-admin"]`)
 			case "passwordless":
 				t.Setenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_ORGANIZATION", "other")
+			case "passwordless-pairs":
+				t.Setenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_PAIRS", "admin/oms@cyj-inner")
 			case "adapter":
 				delete(m.AdapterSHA256, "built-in/user-adapter-built-in")
 				writeControlledManifest(t, m)
@@ -270,7 +275,7 @@ func TestControlledStartupEffectiveConfiguration(t *testing.T) {
 	if err != nil || got != base {
 		t.Fatal("effective default5 differs from explicit5")
 	}
-	for _, key := range []string{"CASDOOR_BUILTIN_ISOLATION_ENABLED", "CASDOOR_BUILTIN_ADMIN_IDS", "CASDOOR_BUILTIN_PROVISIONER_APPLICATION", "CASDOOR_PASSWORDLESS_MASTER_GRANT_APPLICATION", "CASDOOR_PASSWORDLESS_MASTER_GRANT_ORGANIZATION", "CASDOOR_MIGRATION_LOCK_LIMITS_ENABLED", "CASDOOR_MIGRATION_LOCK_WAIT_SECONDS", "CASDOOR_MIGRATION_INNODB_LOCK_WAIT_SECONDS"} {
+	for _, key := range []string{"CASDOOR_BUILTIN_ISOLATION_ENABLED", "CASDOOR_BUILTIN_ADMIN_IDS", "CASDOOR_BUILTIN_PROVISIONER_APPLICATION", "CASDOOR_PASSWORDLESS_MASTER_GRANT_APPLICATION", "CASDOOR_PASSWORDLESS_MASTER_GRANT_ORGANIZATION", "CASDOOR_PASSWORDLESS_MASTER_GRANT_PAIRS", "CASDOOR_MIGRATION_LOCK_LIMITS_ENABLED", "CASDOOR_MIGRATION_LOCK_WAIT_SECONDS", "CASDOOR_MIGRATION_INNODB_LOCK_WAIT_SECONDS"} {
 		t.Run(key, func(t *testing.T) {
 			t.Setenv(key, "different")
 			h, err := startupConfigurationDigest()
@@ -390,4 +395,27 @@ func TestControlledStartupDatabaseTargets(t *testing.T) {
 			t.Fatal("policy engine did not refuse target before opening")
 		}
 	})
+}
+
+func TestControlledStartupDigestUnchangedWhilePairsUnset(t *testing.T) {
+	controlledFixture(t)
+	legacy := map[string]string{}
+	for _, key := range []string{"CASDOOR_BUILTIN_ISOLATION_ENABLED", "CASDOOR_BUILTIN_ADMIN_IDS", "CASDOOR_BUILTIN_PROVISIONER_APPLICATION"} {
+		legacy[key] = conf.GetConfigString(key)
+	}
+	for _, key := range []string{"CASDOOR_PASSWORDLESS_MASTER_GRANT_APPLICATION", "CASDOOR_PASSWORDLESS_MASTER_GRANT_ORGANIZATION"} {
+		legacy[key] = os.Getenv(key)
+	}
+	legacy["CASDOOR_MIGRATION_LOCK_LIMITS_ENABLED"] = "true"
+	legacy["CASDOOR_MIGRATION_LOCK_WAIT_SECONDS"] = "5"
+	legacy["CASDOOR_MIGRATION_INNODB_LOCK_WAIT_SECONDS"] = "5"
+	got, err := startupConfigurationDigest()
+	if err != nil || got != startupDigest(legacy) {
+		t.Fatal("digest must equal the pre-pairs digest while the pairs variable is unset")
+	}
+	t.Setenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_PAIRS", "admin/oms@cyj-inner")
+	bound, err := startupConfigurationDigest()
+	if err != nil || bound == got {
+		t.Fatal("a set pairs variable must be bound into the digest")
+	}
 }

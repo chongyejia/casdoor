@@ -11,6 +11,7 @@ func TestPasswordlessMasterGrantApplicationIsExactAndOptIn(t *testing.T) {
 	user := &User{Owner: "synthetic-org"}
 	t.Setenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_APPLICATION", "")
 	t.Setenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_ORGANIZATION", "")
+	t.Setenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_PAIRS", "")
 	if isPasswordlessMasterGrantApplication(app, user) {
 		t.Fatal("passwordless master grant must be disabled by default")
 	}
@@ -38,6 +39,60 @@ func TestPasswordlessMasterGrantApplicationIsExactAndOptIn(t *testing.T) {
 	app.IsShared = true
 	if isPasswordlessMasterGrantApplication(app, user) {
 		t.Fatal("shared application must be rejected")
+	}
+}
+
+func TestPasswordlessMasterGrantPairsAreExactAndBackwardCompatible(t *testing.T) {
+	builtin := &Application{Owner: "admin", Name: "app-built-in", Organization: "built-in"}
+	builtinUser := &User{Owner: "built-in"}
+	oms := &Application{Owner: "admin", Name: "oms", Organization: "cyj-inner"}
+	omsUser := &User{Owner: "cyj-inner"}
+	other := &Application{Owner: "admin", Name: "other-app", Organization: "cyj-inner"}
+
+	t.Setenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_APPLICATION", "admin/app-built-in")
+	t.Setenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_ORGANIZATION", "built-in")
+	t.Setenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_PAIRS", "")
+	if !isPasswordlessMasterGrantApplication(builtin, builtinUser) || isPasswordlessMasterGrantApplication(oms, omsUser) {
+		t.Fatal("legacy single pair must keep its exact behaviour")
+	}
+
+	t.Setenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_PAIRS", " admin/oms@cyj-inner , ")
+	if !isPasswordlessMasterGrantApplication(builtin, builtinUser) {
+		t.Fatal("legacy pair must stay allowed when pairs are added")
+	}
+	if !isPasswordlessMasterGrantApplication(oms, omsUser) {
+		t.Fatal("listed pair must be allowed")
+	}
+	if isPasswordlessMasterGrantApplication(other, omsUser) {
+		t.Fatal("unlisted application in a listed organization must be rejected")
+	}
+	if isPasswordlessMasterGrantApplication(oms, builtinUser) {
+		t.Fatal("user outside the listed organization must be rejected")
+	}
+	if isPasswordlessMasterGrantApplication(&Application{Owner: "admin", Name: "oms", Organization: "built-in"}, builtinUser) {
+		t.Fatal("listed application moved to another organization must be rejected")
+	}
+	shared := *oms
+	shared.IsShared = true
+	if isPasswordlessMasterGrantApplication(&shared, omsUser) {
+		t.Fatal("shared application must be rejected")
+	}
+
+	t.Setenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_APPLICATION", "")
+	t.Setenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_ORGANIZATION", "")
+	t.Setenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_PAIRS", "admin/app-built-in@built-in,admin/oms@cyj-inner")
+	if !isPasswordlessMasterGrantApplication(builtin, builtinUser) || !isPasswordlessMasterGrantApplication(oms, omsUser) {
+		t.Fatal("pairs variable alone must allow both listed pairs")
+	}
+
+	for _, malformed := range []string{
+		"admin/oms", "oms@cyj-inner", "admin/@cyj-inner", "/oms@cyj-inner", "admin/oms@",
+		"admin/oms@cyj-inner@x", "admin/oms/x@cyj-inner", "admin/oms@cyj/inner", "admin/oms @cyj-inner", "*@*",
+	} {
+		t.Setenv("CASDOOR_PASSWORDLESS_MASTER_GRANT_PAIRS", malformed)
+		if isPasswordlessMasterGrantApplication(oms, omsUser) {
+			t.Fatalf("malformed pair %q must not allow anything", malformed)
+		}
 	}
 }
 
