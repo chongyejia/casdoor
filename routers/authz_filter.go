@@ -467,6 +467,11 @@ func getUrlPath(ctx *context.Context) string {
 }
 
 func getExtraInfo(ctx *context.Context, urlPath string) map[string]interface{} {
+	if urlPath == "/api/webauthn" {
+		return map[string]interface{}{
+			"detailPathUrl": ctx.Request.URL.Path,
+		}
+	}
 	var extra map[string]interface{}
 	if urlPath == "/api/mcp" {
 		var m map[string]interface{}

@@ -214,6 +214,11 @@ func IsAllowed(subOwner string, subName string, method string, urlPath string, o
 		}
 
 		if conf.BuiltinIsolationEnabled() && user.Owner == "built-in" {
+			// WebAuthn is grouped for the generic policy. Isolation must distinguish
+			// public sign-in from credential registration using the original path.
+			if urlPath == "/api/webauthn" {
+				urlPath, _ = extraInfo["detailPathUrl"].(string)
+			}
 			return !user.IsForbidden && builtinUserAPIAllowed(user.Name, method, urlPath, objOwner, objName), nil
 		}
 		if user.IsOrganizationAdmin() && subOwner == objOwner {
