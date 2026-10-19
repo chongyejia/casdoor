@@ -71,7 +71,7 @@ func GetOAuthToken(grantType string, clientId string, clientSecret string, code 
 		if tokenError != nil {
 			return tokenError, nil
 		}
-		return token, nil
+		return wechatMiniProgramTokenResponse(token), nil
 	}
 	if tag == "lark_miniprogram" {
 		if scope != "" || audience != "" || resource != "" {

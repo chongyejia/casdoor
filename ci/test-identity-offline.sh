@@ -37,6 +37,11 @@ go_test ./object -run '^TestAuditRecord(EncodedCredentials|MalformedBody)$'
 go_test ./idp -run '^TestLegacyLark(ExplicitIDSelection|RejectsMissingSelectedID|RejectsUnconfiguredIDType|UsesAppTokenEndpoint|RejectsInvalidAppTokenResponses|RejectsInvalidOIDCResponses)$'
 go_test ./object -run '^Test(LarkMiniProgram(FullTokenFlowRejectsDisabledApplication|FullTokenFlowAllowsScopedActiveUser|FullTokenFlowRejectsSigninPolicies|FullTokenFlowRejectsCrossTenantAndUnreviewedSignup|FullTokenFlowRejectsRequestedScope|FullTokenFlowRejectsExplicitPermissionDeny|RejectsMissingProviderCodeAndIDType|RejectsAmbiguousProviders|RejectsMismatchedSelectedIDBeforeLookup)|TypedLark(IdentityEvidence|UserSelectionRejectsAmbiguityAndCrossOwner)|LegacyLarkUserIdTypeSurvivesProviderConversion)$'
 go_test ./object -run '^TestPasswordlessMaster(Grant(ApplicationIsExactAndOptIn|RequiresAuthenticatedClient|RequiresMasterPassword|DoesNotChangeMfaRejection)|PasswordGrant(MintsVerifiedTokens|RequiresBothOptInFlags|RejectsInvalidCredentialsAndUsers|PairsMintTokensForListedPair|PairsRejectUnlistedAndUnauthenticated)|Grant(PairsAreExactAndBackwardCompatible))$'
+# Upstream sync must not silently delete the local regression tests.
+for test_name in TestWechatTokenCompatMappingAndSwitch TestWechatTokenCompatFullFlow TestWechatTokenCompatErrorsUnchanged; do
+  go test -mod=readonly ./object -list "^${test_name}$" | grep -qx "$test_name"
+done
+go_test ./object -run '^TestWechatTokenCompat(MappingAndSwitch|FullFlow|ErrorsUnchanged)$'
 go_test ./object -run '^TestTokenLookupIDSessionHints$'
 go_test ./object -run '^TestMigration(DSNOffAndOtherDriversPreserveBytes|DSNPreservesConnectionOptions|LockOptionBounds|DSNRejectsInvalidPrefixWithoutCredentialDisclosure)$'
 go_test ./object -run '^TestControlledStartup(LegacyUnchanged|RejectsUnsafeInputs|ManifestBinding|ExclusiveFence|CompletedReceiptBinding|EffectiveConfiguration|FileBounds|ServeGuardsDDL|AdapterScope|DatabaseTargets|NonregularFiles)$'
